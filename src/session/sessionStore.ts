@@ -220,22 +220,28 @@ export class SessionStore {
     const current = this.ids();
     const known = new Set(current);
     const discovered = sessions.filter((session) => session.id && !known.has(session.id));
-    if (!discovered.length) {
-      return [];
-    }
     const all = [...discovered.map((session) => session.id), ...current];
     const ids = all.slice(0, 200);
     const evicted = all.slice(200);
     const cwds = this.cwds();
-    for (const session of discovered) {
-      if (session.working_directory) {
+    let cwdsChanged = false;
+    for (const session of sessions) {
+      if (session.working_directory && cwds[session.id] !== session.working_directory) {
         cwds[session.id] = session.working_directory;
+        cwdsChanged = true;
       }
     }
-    await Promise.all([
-      this.state.update(SessionStore.IDS_KEY, ids),
-      this.state.update(SessionStore.CWDS_KEY, cwds)
-    ]);
+    if (!discovered.length && !cwdsChanged) {
+      return [];
+    }
+    const writes: Thenable<void>[] = [];
+    if (discovered.length) {
+      writes.push(this.state.update(SessionStore.IDS_KEY, ids));
+    }
+    if (cwdsChanged) {
+      writes.push(this.state.update(SessionStore.CWDS_KEY, cwds));
+    }
+    await Promise.all(writes);
     this.pruneCwds(ids);
     this.pruneDrafts(ids);
     this.pruneSessionList(ids);

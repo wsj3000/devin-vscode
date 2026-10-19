@@ -199,7 +199,7 @@ test("adding a session reports the tracked ids it evicts", () => {
 
 test("importing discovered sessions keeps their activity order and directories", async () => {
   const store = new SessionStore(memento());
-  store.add("known", "/known");
+  store.add("known");
 
   await store.importSessions([
     { id: "newest", short_id: "newest", working_directory: "/newest" },
