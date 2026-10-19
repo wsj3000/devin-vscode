@@ -5030,9 +5030,15 @@ export class ChatController implements AcpHost {
         });
         this.recordDiffs(u, rt);
         return;
-      case "usage_update":
+      case "usage_update": {
+        // Fusion tags lead usage as root or leaves it untagged.
+        const source = subagentParent(u);
+        if ((source && source !== "root") || u._meta?.["cognition.ai/sidekick"] === true) {
+          return;
+        }
         this.emit(rt, { type: "usage", used: u.used, size: u.size, cost: u.cost });
         return;
+      }
       case "available_commands_update":
         if (rt) rt.commands = u.availableCommands;
         this.emit(rt, { type: "commands", commands: u.availableCommands });

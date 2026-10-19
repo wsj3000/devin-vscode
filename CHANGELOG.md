@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.7] - 2026-10-19
+
+### Highlights
+- Keep context usage on the lead model during Fusion and subagent work.
+
 ## [0.13.6] - 2026-10-19
 
 ### Highlights

@@ -107,6 +107,42 @@ test("standard ACP tool names reach the webview", posixOnly, async () => {
   }
 });
 
+test("context usage stays on the lead while Fusion sidekicks and subagents run", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "" } });
+  try {
+    await h.ready();
+    const id = await h.startChat("track lead context");
+    const rt = h.controller.runtimes.get(id);
+    const usage = (used, size, meta) => rt.client.emit("update", {
+      sessionId: id,
+      update: { sessionUpdate: "usage_update", used, size, _meta: meta }
+    });
+    const cost = { amount: 0.12, currency: "USD" };
+    rt.client.emit("update", {
+      sessionId: id,
+      update: { sessionUpdate: "usage_update", used: 26843, size: 1000000, cost }
+    });
+    usage(11015, 262000, { "cognition.ai/subagent_context": { parentAgentId: "sidekick" } });
+    usage(15000, 200000, { "cognition.ai/subagent_context": { parentAgentId: "worker-1" } });
+    usage(12000, 262000, { "cognition.ai/sidekick": true });
+    assert.deepStrictEqual(h.postsOf("usage"), [{ type: "usage", used: 26843, size: 1000000, cost }]);
+
+    usage(36253, 1000000, { "cognition.ai/subagent_context": { parentAgentId: "root" } });
+    usage(11156, 262000, { "cognition.ai/subagent_context": { parentAgentId: "sidekick" } });
+    assert.strictEqual(h.last("usage").used, 36253);
+    assert.strictEqual(h.last("usage").size, 1000000);
+    assert.deepStrictEqual(rt.log.filter((item) => item.type === "usage").map((item) => item.used), [26843, 36253]);
+
+    await h.startChat("another chat");
+    usage(40000, 1000000);
+    usage(14000, 262000, { "cognition.ai/subagent_context": { parentAgentId: "sidekick" } });
+    assert.deepStrictEqual(rt.bgBuffer.filter((item) => item.type === "usage").map((item) => item.used), [40000]);
+    assert.strictEqual(h.last("usage").used, 36253, "background usage does not alter the visible chat");
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
   const h = createChat({ promptDelay: 500, config: { "editorContext.diagnostics": true } });
   await h.ready();

@@ -76,7 +76,7 @@ export type SessionUpdate =
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
   | { sessionUpdate: "tool_call"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
   | { sessionUpdate: "tool_call_update"; toolCallId: string; name?: string; title?: string; kind?: string; status?: ToolCallStatus; content?: ToolCallContent[]; rawInput?: unknown; locations?: { path: string; line?: number }[]; _meta?: UpdateMeta }
-  | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string } }
+  | { sessionUpdate: "usage_update"; used: number; size: number; cost?: { amount: number; currency: string }; _meta?: UpdateMeta }
   | { sessionUpdate: "available_commands_update"; availableCommands: AvailableCommand[] }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: string; [k: string]: unknown };
@@ -92,11 +92,12 @@ export interface UpdateMeta {
   "cognition.ai/inferenceToolName"?: string;
   "cognition.ai/toolName"?: string;
   "cognition.ai/eventType"?: string;
+  "cognition.ai/sidekick"?: boolean;
   // On a tool_call_update whose toolCallId is the subagent's own agentId.
   "cognition.ai/subagent_started"?: SubagentStarted;
   "cognition.ai/subagent_completed"?: SubagentCompleted;
-  // On every update the subagent itself produces (tool calls, message and
-  // thought chunks), naming the subagent that produced it.
+  // Names the source of delegated updates, including context usage.
+  // Fusion usage uses root for the lead and sidekick for its sidekick.
   "cognition.ai/subagent_context"?: { parentAgentId?: string };
   [k: string]: unknown;
 }
