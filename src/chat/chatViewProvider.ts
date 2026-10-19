@@ -6,6 +6,7 @@ import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
 import {
   AgentStopped,
+  AvailableCommand,
   CliOutput,
   ConfigOption,
   ContentBlock,
@@ -67,6 +68,7 @@ interface Runtime {
   mode?: string;
   model?: string;
   configOptions?: ConfigOption[];
+  commands?: AvailableCommand[];
   // Permission/elicitation requests from a background session, re-surfaced to
   // the webview when the session is next opened. Several can be outstanding at
   // once, so this is a queue rather than a single slot.
@@ -308,7 +310,7 @@ function thoughtOption(options?: ConfigOption[]): ConfigOption | undefined {
 // `thought_level`, and only the "high" lead-effort Fusion pairs. A picked uid
 // therefore has to be translated to the uid this session advertises, with the
 // stripped effort carried over for `thought_level`.
-const EFFORT_SUFFIX = /-(none|low|medium|high|xhigh)$/;
+const EFFORT_SUFFIX = /-(none|low|medium|high|xhigh|max)(?=-fast$|$)/;
 function effortOf(uid: string): string | undefined {
   return EFFORT_SUFFIX.exec(uid)?.[1];
 }
@@ -380,6 +382,7 @@ export class ChatController implements AcpHost {
   private readonly loading = new Map<string, Promise<void>>();
   // A brand-new session being created (id not known until session/new returns).
   private startingNew?: Promise<Runtime>;
+  private commandsQuery?: Promise<void>;
   private idleTimer?: NodeJS.Timeout;
 
   private health?: CliHealth;
@@ -1476,6 +1479,9 @@ export class ChatController implements AcpHost {
         case "ready":
           await this.onWebviewReady();
           return;
+        case "requestCommands":
+          await this.requestCommands();
+          return;
         case "send":
           await this.handleSend(String(msg.text || ""), !!msg.newSession, !!msg.preserveTranscript);
           return;
@@ -2030,6 +2036,11 @@ export class ChatController implements AcpHost {
           await this.dropStaged(undefined);
           this.stagedChanged(rt.id);
           this.post({ type: "sessionReady", sessionId: rt.id });
+          // The catalogue can arrive before session/new returns, when the
+          // runtime has no id and cannot yet publish to the visible chat.
+          if (this.activeId === rt.id && rt.commands) {
+            this.post({ type: "commands", commands: rt.commands });
+          }
         }
         this.ensureIdleTimer();
         this.broadcastStatuses();
@@ -4865,6 +4876,42 @@ export class ChatController implements AcpHost {
 
   // --- Incoming session/update notifications -------------------------------
 
+  private async requestCommands(): Promise<void> {
+    if (this.commandsQuery) return this.commandsQuery;
+    const target = this.activeId;
+    this.commandsQuery = (async () => {
+      if (!(await this.ensureReady())) return;
+      const rt = this.active() || (this.startingNew ? await this.startingNew : undefined);
+      let commands = rt?.commands;
+      if (!commands) {
+        // The new chat composer has no session yet. Ask a temporary session
+        // for its actual catalogue without creating a chat or sending a prompt.
+        commands = await withQueryClient(this.resolvedCli, this.cwd(), this.clientEnv(), async (client) => {
+          let catalogue: AvailableCommand[] = [];
+          client.on("update", (n: SessionUpdateNotification) => {
+            if (n.update.sessionUpdate === "available_commands_update") {
+              catalogue = n.update.availableCommands as AvailableCommand[];
+            }
+          });
+          const session = await client.newSession(this.cwd(), this.additionalDirs(this.cwd()));
+          try {
+            return catalogue;
+          } finally {
+            await client.deleteSession(session.sessionId);
+          }
+        });
+      }
+      if (!this.closed && this.activeId === target && commands) {
+        this.post({ type: "commands", commands });
+      }
+    })();
+    try {
+      await this.commandsQuery;
+    } finally {
+      this.commandsQuery = undefined;
+    }
+  }
+
   // Send a transcript message to the webview if its session is the visible one,
   // otherwise buffer it on the runtime so the missed stream can be replayed when
   // the user returns (background progress is never lost). History replays (a
@@ -4987,6 +5034,7 @@ export class ChatController implements AcpHost {
         this.emit(rt, { type: "usage", used: u.used, size: u.size, cost: u.cost });
         return;
       case "available_commands_update":
+        if (rt) rt.commands = u.availableCommands;
         this.emit(rt, { type: "commands", commands: u.availableCommands });
         return;
       case "current_mode_update":

@@ -182,15 +182,15 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function effortKey(fam, uid) {
     return isFusion(fam) ? `fusion:${fusionIdentity(uid).lead}` : fam?.id;
   }
-  const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh"];
-  const EFFORT_NAMES = { none: "No Thinking", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh" };
+  const EFFORT_ORDER = ["none", "low", "medium", "high", "xhigh", "max"];
+  const EFFORT_NAMES = { none: "No Thinking", low: "Low", medium: "Medium", high: "High", xhigh: "XHigh", max: "Max" };
   function effortsFor(fam, uid) {
     const known = fam ? thoughtLevelsByFamily[effortKey(fam, uid)] : undefined;
     if (known?.length) return known;
     if (!isFusion(fam)) return [];
     const wanted = fusionIdentity(uid || fam.default);
     const seen = new Set();
-    for (const variant of fam.variants || []) {
+    for (const variant of fusionPairs(fam)) {
       const identity = fusionIdentity(variant.value);
       if (identity.lead === wanted.lead && identity.sidekick === wanted.sidekick && identity.effort) seen.add(identity.effort);
     }
@@ -403,8 +403,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
   function fusionIdentity(uid) {
     const [leadUid = "", sidekick = ""] = String(uid || "").replace(/^fusion-/, "").split("-sidekick-");
-    const effortMatch = leadUid.match(/-(none|low|medium|high|xhigh)$/);
-    return { lead: leadUid.replace(/-(?:none|low|medium|high|xhigh)$/, ""), sidekick, effort: effortMatch ? effortMatch[1] : "" };
+    const suffix = /-(none|low|medium|high|xhigh|max)(?=-fast$|$)/;
+    const effortMatch = leadUid.match(suffix);
+    return { lead: leadUid.replace(suffix, ""), sidekick, effort: effortMatch ? effortMatch[1] : "" };
   }
   function fusionChoice(choice) {
     const identity = fusionIdentity(choice.value);
@@ -412,12 +413,9 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     return {
       ...choice,
       ...identity,
-      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High|XHigh)(?: Thinking)?$/, "") || identity.lead,
+      leadName: lead.replace(/ (?:No Thinking|Low|Medium|High|XHigh|Max)(?: Thinking)?(?= Fast$|$)/, "") || identity.lead,
       sidekickName: sidekick || identity.sidekick
     };
-  }
-  function compactFusionLead(name) {
-    return String(name || "").replace(/^Claude /, "");
   }
   function compactFusionSidekick(name) {
     return String(name || "").replace(/ (Low|Medium|High|XHigh)$/, " · $1");
@@ -453,7 +451,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const selected = pair();
       const effortName = levels.find((item) => item.value === effort)?.name || effort;
       if (selected) {
-        leadTitle.textContent = `${compactFusionLead(selected.leadName)} · ${effortName}`;
+        leadTitle.textContent = `${selected.leadName}${effortName ? " · " + effortName : ""}`;
         sidekickTitle.textContent = compactFusionSidekick(selected.sidekickName);
         button.title = `${selected.leadName} · ${effortName} + ${selected.sidekickName}`;
       }
@@ -515,7 +513,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       status.className = "fusion-config-loading";
       status.setAttribute("role", "status");
       status.setAttribute("aria-busy", "true");
-      status.textContent = "Loading effort options...";
+      status.textContent = "Loading effort options";
       root.appendChild(status);
       return root;
     }
@@ -532,6 +530,21 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       menuBuilt = true;
       sync();
     }
+    function positionMenu() {
+      const rect = button.getBoundingClientRect();
+      const width = Math.min(440, window.innerWidth - 16);
+      const above = rect.top - 12;
+      const below = window.innerHeight - rect.bottom - 12;
+      menu.style.width = width + "px";
+      menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + "px";
+      menu.style.right = "auto";
+      menu.style.top = above >= below ? "auto" : (rect.bottom + 4) + "px";
+      menu.style.bottom = above >= below ? (window.innerHeight - rect.top + 4) + "px" : "auto";
+      menu.style.maxHeight = Math.max(0, Math.min(560, Math.max(above, below))) + "px";
+    }
+    window.addEventListener("resize", () => {
+      if (!menu.classList.contains("hidden")) positionMenu();
+    });
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       document.querySelectorAll(".dd-menu").forEach((item) => { if (item !== menu) item.classList.add("hidden"); });
@@ -541,6 +554,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       const open = !menu.classList.contains("hidden");
       button.classList.toggle("open", open);
       button.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) positionMenu();
     });
     return {
       set(choices, currentModel, effortOptions, currentEffort) {
@@ -560,6 +574,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         // rebuild it in place when they really changed.
         if (!menu.classList.contains("hidden")) {
           if (changed || !menuBuilt) renderMenu(); else sync();
+          positionMenu();
         } else {
           sync();
         }
@@ -1323,7 +1338,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (ac) {
       if (e.key === "ArrowDown") { e.preventDefault(); ac.index = (ac.index + 1) % ac.items.length; renderAutocomplete(); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); ac.index = (ac.index - 1 + ac.items.length) % ac.items.length; renderAutocomplete(); return; }
-      if ((e.key === "Enter" || e.key === "Tab") && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index]); return; }
+      if (e.key === "Enter" && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index], true); return; }
+      if (e.key === "Tab" && ac.items.length) { e.preventDefault(); acceptAutocomplete(ac.items[ac.index], false); return; }
       if (e.key === "Escape") { e.preventDefault(); closeAutocomplete(); return; }
     }
     // Escape before the menu has even opened still abandons the mention: its reply
@@ -2089,9 +2105,10 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     const value = el.input.value;
     const caret = el.input.selectionStart ?? value.length;
     if (value.startsWith("/") && value.indexOf(" ") === -1) {
+      if (!commands.length) vscode.postMessage({ type: "requestCommands" });
       const q = value.slice(1).toLowerCase();
       const items = commands.filter((c) => c.name.toLowerCase().includes(q)).slice(0, 40)
-        .map((c) => ({ kind: "slash", name: c.name, description: c.description || "" }));
+        .map((c) => ({ kind: "slash", name: c.name, description: c.description || "", input: c.input }));
       openAutocomplete(items);
       return;
     }
@@ -2130,7 +2147,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       row.appendChild(icon);
       row.appendChild(primary);
       row.appendChild(secondary);
-      row.addEventListener("mousedown", (ev) => { ev.preventDefault(); acceptAutocomplete(it); });
+      row.addEventListener("mousedown", (ev) => { ev.preventDefault(); acceptAutocomplete(it, true); });
       el.autocomplete.appendChild(row);
       if (i === ac.index) activeRow = row;
     });
@@ -2151,13 +2168,17 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     el.autocomplete.innerHTML = "";
   }
 
-  function acceptAutocomplete(item) {
+  function acceptAutocomplete(item, submitComplete) {
     if (item.kind === "slash") {
-      el.input.value = "/" + item.name + " ";
+      const needsInput = item.input !== undefined;
+      el.input.value = "/" + item.name + (needsInput ? " " : "");
       el.input.focus();
       closeAutocomplete();
       autosize();
       updateSendState();
+      // A complete command should act like a clicked menu command. Commands
+      // with an argument hint stay in the composer so the user can finish them.
+      if (!needsInput && submitComplete) send();
       return;
     }
     const value = el.input.value;
@@ -7497,7 +7518,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         applyModelOptions(m.models, currentModelUid || m.currentModel);
         break;
       }
-      case "commands": commands = Array.isArray(m.commands) ? m.commands : []; break;
+      case "commands":
+        commands = Array.isArray(m.commands) ? m.commands : [];
+        // The catalogue may arrive after the user has already typed a slash.
+        if (commands.length && el.input.value.startsWith("/")) updateAutocomplete();
+        break;
       case "fileSuggestions":
         if (m.query === fileQueryToken) {
           openAutocomplete((m.items || []).map((f) => ({ kind: "file", path: f.path, label: f.label, detail: f.detail })));

@@ -36,6 +36,8 @@ function createHarness({ surface = "view" } = {}) {
     `<body data-logo="logo.svg" data-model-icons="{}" data-surface="${surface}">${body}</body></html>`;
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true, virtualConsole });
   const { window } = dom;
+  // jsdom has no layout, but completion uses the browser's scrolling API.
+  window.HTMLElement.prototype.scrollIntoView = function () {};
 
   const posted = [];
   // What the page has recorded for a reload (the chat a tab is holding).

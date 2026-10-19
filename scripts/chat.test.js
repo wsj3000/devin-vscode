@@ -182,6 +182,37 @@ function prompts(h) {
   });
 }
 
+test("a new chat publishes commands announced before session/new returns", posixOnly, async () => {
+  const commands = [{ name: "help", description: "Show available commands" }];
+  const h = createChat({ commands });
+  try {
+    await h.ready();
+    h.send({ type: "newSession" });
+    assert.ok(await h.until(() => h.postsOf("sessionReady").length > 0));
+    assert.deepStrictEqual(h.last("commands")?.commands, commands);
+    assert.strictEqual(h.agentSaw("session/prompt").length, 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("slash completion before a chat queries the CLI and deletes its temporary session", posixOnly, async () => {
+  const commands = [{ name: "context" }];
+  const h = createChat({ commands });
+  try {
+    await h.ready();
+    h.send({ type: "requestCommands" });
+    assert.ok(await h.until(() => h.postsOf("commands").length > 0));
+    assert.deepStrictEqual(h.last("commands").commands, commands);
+    assert.strictEqual(h.agentSaw("session/new").length, 1);
+    assert.strictEqual(h.agentSaw("session/delete").length, 1);
+    assert.strictEqual(h.agentSaw("session/prompt").length, 0);
+    assert.strictEqual(h.liveChats(), 0);
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("file URI links open the referenced file", posixOnly, async () => {
   const h = createChat();
   await h.ready();
@@ -1715,7 +1746,8 @@ test("catalogue uids are translated to the values the session's model option acc
       options.find((option) => option.id === "model").options.push({
         group: "gpt-5.6-sol", name: "GPT-5.6 Sol", options: [{ value: "gpt-5-6-sol-medium", name: "GPT-5.6 Sol" }]
       });
-      options.find((option) => option.id === "thought_level").options.push({ value: "none", name: "None" }, { value: "medium", name: "Medium" });
+      options.find((option) => option.id === "model").options.push({ value: "fusion-claude-opus-5-high-fast-sidekick-swe-2-medium", name: "Fusion Fast" });
+      options.find((option) => option.id === "thought_level").options.push({ value: "none", name: "None" }, { value: "medium", name: "Medium" }, { value: "max", name: "Max" });
       return options;
     };
     widen(rt.configOptions);
@@ -1741,6 +1773,14 @@ test("catalogue uids are translated to the values the session's model option acc
       h.agentSaw("session/set_config_option").slice(before).map((item) => [item.params.configId, item.params.value]),
       [["model", "fusion-claude-opus-5-high-sidekick-swe-2-medium"], ["thought_level", "medium"]],
       "a Fusion pair the session does not list maps to its accepted uid, with the lead effort going to thought_level"
+    );
+    const beforeFast = h.agentSaw("session/set_config_option").length;
+    h.send({ type: "setFusionModel", model: "fusion-claude-opus-5-max-fast-sidekick-swe-2-medium", thoughtLevel: "max", requestId: 53 });
+    assert.ok(await h.until(() => h.postsOf("modelConfigApplied").length === 3));
+    assert.deepStrictEqual(
+      h.agentSaw("session/set_config_option").slice(beforeFast).map((item) => [item.params.configId, item.params.value]),
+      [["model", "fusion-claude-opus-5-high-fast-sidekick-swe-2-medium"], ["thought_level", "max"]],
+      "Max effort preserves the Fast lead while using the accepted ACP model uid"
     );
   } finally {
     await h.dispose();

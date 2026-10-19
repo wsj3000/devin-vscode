@@ -4943,6 +4943,60 @@ test("a file suggestion that arrives too late does not steal the next Enter", as
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("typing slash requests a missing catalogue and opens it when it arrives", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  const menu = h.document.getElementById("autocomplete");
+  input.value = "/";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  assert.ok(h.posted.some((message) => message.type === "requestCommands"));
+  assert.ok(menu.classList.contains("hidden"));
+  h.post({ type: "commands", commands: [{ name: "help" }, { name: "context" }] });
+  assert.ok(!menu.classList.contains("hidden"));
+  assert.strictEqual(menu.querySelectorAll(".ac-item").length, 2);
+  const help = [...menu.querySelectorAll(".ac-item")].find((row) => row.querySelector(".ac-primary").textContent === "/help");
+  help.dispatchEvent(new h.window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+  assert.strictEqual(h.posted.filter((message) => message.type === "send").at(-1).text, "/help");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("selecting a complete slash command runs it while commands with input wait", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear" });
+  h.post({ type: "sessionReady", sessionId: "A" });
+  h.post({
+    type: "commands",
+    commands: [
+      { name: "context", description: "Show context window usage" },
+      { name: "bug", description: "Report a bug", input: { hint: "<description>" } }
+    ]
+  });
+  await h.settle(10);
+  const input = h.document.getElementById("input");
+  const menu = h.document.getElementById("autocomplete");
+
+  input.value = "/context";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  menu.querySelector(".ac-item").dispatchEvent(new h.window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((message) => message.type === "send").at(-1).text, "/context");
+  assert.strictEqual(input.value, "", "a complete command is submitted");
+
+  input.value = "/bug";
+  input.dispatchEvent(new h.window.Event("input", { bubbles: true }));
+  await h.settle(5);
+  menu.querySelector(".ac-item").dispatchEvent(new h.window.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+  await h.settle(5);
+  assert.strictEqual(h.posted.filter((message) => message.type === "send").length, 1, "a command that needs input is not submitted yet");
+  assert.strictEqual(input.value, "/bug ");
+  assert.strictEqual(h.errors().length, 0);
+});
+
 test("a prompt left half written comes back, and survives the panel settling", async () => {
   // The host restores the draft before it says `ready`, and says `ready` twice: on
   // open, and again once the CLI health check finishes. Handing the composer back
@@ -5489,7 +5543,7 @@ test("Fusion keeps lead effort and sidekick in one configuration picker", async 
   const picker = h.document.querySelector("#fusion-dd");
   assert.ok(!picker.classList.contains("hidden"), "Fusion has one configuration control");
   assert.strictEqual(picker.querySelector(".dd-btn").getAttribute("aria-label"), "Configure Fusion");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · Low");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Claude Opus 5 · Low");
   assert.strictEqual(picker.querySelector(".fusion-config-sidekick-title").textContent, "SWE-2 · Medium");
   assert.ok(h.document.querySelector("#thinking-dd").classList.contains("hidden"), "thinking effort moves inside Fusion configuration");
   const css = fs.readFileSync(path.join(ROOT, "media", "main.css"), "utf8");
@@ -5761,7 +5815,7 @@ test("a model that reports no effort clears the previous model's effort", async 
   });
   await h.settle(20);
   const picker = h.document.querySelector("#fusion-dd");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the reported effort is on the button");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Claude Opus 5 · High", "the reported effort is on the button");
 
   // The user moves to a model with no thought level and the host answers with
   // an empty currentThoughtLevel, which is a deliberate clear, not a gap.
@@ -5779,11 +5833,11 @@ test("a model that reports no effort clears the previous model's effort", async 
   assert.ok(picker.classList.contains("hidden"), "the Fusion picker is hidden on a normal model");
 
   // Back on Fusion the cleared effort must not come back. If "high" had been
-  // kept the button would read "Opus 5 · High", instead it falls back to the
+  // kept the button would read "Claude Opus 5 · High", instead it falls back to the
   // first level.
   modelDD.querySelector(".dd-btn").click();
   [...modelDD.querySelectorAll(".dd-item")].find((el) => el.textContent.includes("Fusion")).click();
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · Low", "the cleared effort does not come back");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Claude Opus 5 · Low", "the cleared effort does not come back");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -5873,8 +5927,8 @@ test("Fusion derives its effort levels from the catalogue variants before ACP re
   assert.strictEqual(typeof effortPost.requestId, "number", "the request is tagged for acknowledgement");
 
   const grouped = [
-    { value: "fusion-claude-opus-5-high-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 High + SWE-2 Medium)" },
-    { value: "fusion-gpt-6-astra-high-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra High Thinking + SWE-2 High)" }
+    { value: "fusion-claude-opus-5-sidekick-swe-2-medium", name: "Fusion (Claude Opus 5 + SWE-2 Medium)" },
+    { value: "fusion-gpt-6-astra-sidekick-swe-2-high", name: "Fusion (GPT-6 Astra + SWE-2 High)" }
   ];
   const noCatalogue = [
     { id: "fusion", name: "Fusion", default: "fusion-claude-opus-5-high-sidekick-swe-2-medium", variants: [] },
@@ -5892,7 +5946,7 @@ test("Fusion derives its effort levels from the catalogue variants before ACP re
   assert.ok(status, "a loading status stands in for the missing effort row");
   assert.strictEqual(status.getAttribute("role"), "status");
   assert.strictEqual(status.getAttribute("aria-busy"), "true");
-  assert.strictEqual(status.textContent, "Loading effort options...");
+  assert.strictEqual(status.textContent, "Loading effort options");
 
   h.post({
     type: "options", currentMode: "accept-edits",
@@ -5944,20 +5998,20 @@ test("only the latest model change acknowledgement can reconcile a rapid series 
   h.post({ type: "modelConfigApplied", requestId: 1, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "low" });
   staleOptions("low", "fusion-claude-opus-5-low-sidekick-swe-2-medium");
   h.post({ type: "model", model: "fusion-claude-opus-5-low-sidekick-swe-2-medium" });
-  assert.strictEqual(title(), "Opus 5 · High", "an old acknowledgement cannot roll back a newer pick");
+  assert.strictEqual(title(), "Claude Opus 5 · High", "an old acknowledgement cannot roll back a newer pick");
   assert.strictEqual(effortButton("high").classList.contains("selected"), true);
 
   effortButton("medium").click();
   h.post({ type: "modelConfigApplied", requestId: 2, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
   staleOptions("high", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
-  assert.strictEqual(title(), "Opus 5 · Medium");
+  assert.strictEqual(title(), "Claude Opus 5 · Medium");
 
   effortButton("low").click();
   h.post({ type: "modelConfigApplied", requestId: 3, model: "fusion-claude-opus-5-medium-sidekick-swe-2-medium", thoughtLevel: "medium" });
   effortButton("high").click();
   h.post({ type: "modelConfigApplied", requestId: 4, model: "fusion-claude-opus-5-low-sidekick-swe-2-medium", thoughtLevel: "high" });
   staleOptions("medium", "fusion-claude-opus-5-medium-sidekick-swe-2-medium");
-  assert.strictEqual(title(), "Opus 5 · High", "the guard is released only by the latest request id");
+  assert.strictEqual(title(), "Claude Opus 5 · High", "the guard is released only by the latest request id");
 
   assert.deepStrictEqual(sentEfforts().map((message) => [message.value, message.requestId]), [
     ["low", 1], ["high", 2], ["medium", 3], ["low", 4], ["high", 5]
@@ -5966,7 +6020,7 @@ test("only the latest model change acknowledgement can reconcile a rapid series 
   h.post({ type: "modelConfigApplied", requestId: 5, model: "fusion-claude-opus-5-high-sidekick-swe-2-medium", thoughtLevel: "high" });
   staleOptions("medium", "fusion-claude-opus-5-high-sidekick-swe-2-medium");
   await h.settle(20);
-  assert.strictEqual(title(), "Opus 5 · Medium", "a post-ack authoritative update applies normally");
+  assert.strictEqual(title(), "Claude Opus 5 · Medium", "a post-ack authoritative update applies normally");
   assert.strictEqual(h.errors().length, 0);
 });
 
@@ -6037,7 +6091,7 @@ test("a stale model change acknowledgement cannot paint a new session", async ()
   [...picker.querySelectorAll(".fusion-config-option[data-kind=effort]")].find((el) => el.dataset.value === "high").click();
   const effortPost = h.posted.slice().reverse().find((message) => message.type === "setConfigOption");
   assert.strictEqual(effortPost.requestId, 1, "the pick is tagged");
-  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Opus 5 · High", "the optimistic pick is on the button");
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "Claude Opus 5 · High", "the optimistic pick is on the button");
 
   h.post({ type: "clear", reset: true });
   h.post({ type: "sessionReady", sessionId: "session-two" });
@@ -6147,10 +6201,36 @@ test("a reply about another Fusion lead cannot move the shown effort", async () 
   await h.settle(20);
   const picker = h.document.querySelector("#fusion-dd");
   const title = () => picker.querySelector(".fusion-config-lead-title").textContent;
-  assert.strictEqual(title(), "Opus 5 · High");
+  assert.strictEqual(title(), "Claude Opus 5 · High");
   h.post(options("fusion-gpt-6-astra-low-sidekick-swe-2-medium", "low"));
   await h.settle(20);
-  assert.strictEqual(title(), "Opus 5 · High", "a reply about GPT-6 Astra cannot change Opus 5's shown effort");
+  assert.strictEqual(title(), "Claude Opus 5 · High", "a reply about GPT-6 Astra cannot change Opus 5's shown effort");
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("Fusion groups Fast and Max variants and sends the selected effort", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  const variants = ["low", "medium", "high", "xhigh", "max"].map((effort) => ({
+    value: `fusion-gpt-6-1-sol-${effort}-fast-sidekick-swe-2-medium`,
+    name: `Fusion (GPT-6.1 Sol ${effort[0].toUpperCase() + effort.slice(1)} Thinking Fast + SWE-2 Medium)`
+  }));
+  h.post({
+    type: "options", modes: [],
+    models: [{ id: "fusion", name: "Fusion", default: variants[0].value, variants }],
+    currentModel: variants[2].value, currentThoughtLevel: "", thoughtLevels: [], modelChoices: {}
+  });
+  const picker = h.document.querySelector("#fusion-dd");
+  picker.querySelector(".dd-btn").click();
+  assert.strictEqual(picker.querySelectorAll("[data-kind=lead]").length, 1, "efforts belong to the same Fast lead");
+  assert.strictEqual(picker.querySelector("[data-kind=lead]").textContent, "GPT-6.1 Sol Fast");
+  assert.deepStrictEqual([...picker.querySelectorAll("[data-kind=effort]")].map((el) => el.dataset.value), ["low", "medium", "high", "xhigh", "max"]);
+  picker.querySelector("[data-kind=effort][data-value=max]").click();
+  const request = h.posted.filter((message) => message.type === "setConfigOption").at(-1);
+  assert.strictEqual(request.value, "max");
+  assert.strictEqual(request.model, variants[4].value);
+  assert.strictEqual(picker.querySelector(".fusion-config-lead-title").textContent, "GPT-6.1 Sol Fast · Max");
   assert.strictEqual(h.errors().length, 0);
 });
 

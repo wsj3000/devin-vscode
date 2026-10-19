@@ -8,6 +8,29 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.6] - 2026-10-19
+
+### Highlights
+- Keep Fusion effort controls reachable in large model catalogues.
+- Show full Fusion names with wrapping instead of ellipses.
+- Recognize Max effort and Fast model variants.
+
+## [0.13.5] - 2026-10-19
+
+### Highlights
+- Remove the extension's `/usage` command and native terminal launch.
+
+## [0.13.4] - 2026-10-19
+
+### Highlights
+- Run `/usage` in the native CLI terminal to show account quota.
+
+## [0.13.3] - 2026-10-19
+
+### Highlights
+- Show slash commands in new chats and after the catalogue finishes loading.
+- Run parameterless CLI slash commands when they are selected from completion.
+
 ## [0.13.1] - 2026-10-19
 
 ### Highlights

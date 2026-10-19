@@ -155,6 +155,7 @@ process.stdin.on("data", async (chunk) => {
         // id. Anything that answers such an update with "whatever is on screen"
         // paints one chat's settings into another's.
         send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: JSON.parse(process.env.DV_COMMANDS || "[]") } } });
         await delay(num("DV_NEW_DELAY"));
         reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
         break;
@@ -244,6 +245,7 @@ function createChat(opts = {}) {
     DV_PROMPT_DELAY: String(opts.promptDelay || 0),
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
     DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
+    DV_COMMANDS: JSON.stringify(opts.commands || []),
     DV_LIST_SESSIONS: JSON.stringify(opts.sessions || [])
   };
   globalThis.__dvConfig = Object.assign(
