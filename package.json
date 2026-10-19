@@ -1,22 +1,22 @@
 {
   "name": "devin-vscode",
-  "displayName": "Devin for VS Code",
+  "displayName": "Devin for VS Code (Coder fork)",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.13.0",
-  "publisher": "shayanline",
+  "version": "0.13.1",
+  "publisher": "wsj3000",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
   "preview": true,
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/shayanline/devin-vscode.git"
+    "url": "https://github.com/wsj3000/devin-vscode.git"
   },
-  "homepage": "https://github.com/shayanline/devin-vscode#readme",
+  "homepage": "https://github.com/wsj3000/devin-vscode#readme",
   "bugs": {
-    "url": "https://github.com/shayanline/devin-vscode/issues"
+    "url": "https://github.com/wsj3000/devin-vscode/issues"
   },
-  "qna": "https://github.com/shayanline/devin-vscode/issues",
+  "qna": "https://github.com/wsj3000/devin-vscode/issues",
   "galleryBanner": {
     "color": "#1f1f1f",
     "theme": "dark"

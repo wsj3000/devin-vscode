@@ -1,16 +1,14 @@
-# Devin for VS Code
+# Devin for VS Code, Coder fork
 
-[![VS Code Marketplace](https://badgen.net/vs-marketplace/v/shayanline.devin-vscode?label=Marketplace)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
-[![Marketplace installs](https://badgen.net/vs-marketplace/i/shayanline.devin-vscode?label=Installs)](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode)
-[![Latest release](https://img.shields.io/github/v/release/shayanline/devin-vscode?label=Release)](https://github.com/shayanline/devin-vscode/releases/latest)
-[![CI](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/shayanline/devin-vscode/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/wsj3000/devin-vscode?label=Release)](https://github.com/wsj3000/devin-vscode/releases/latest)
+[![CI](https://github.com/wsj3000/devin-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/wsj3000/devin-vscode/actions/workflows/ci.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE.md)
 
 Use [Devin CLI](https://docs.devin.ai/cli) as a coding assistant without leaving VS Code. Ask Devin to explain code, fix bugs, build features, run commands, or edit files from a native chat panel.
 
 Each chat runs a real Devin CLI session in your workspace. Replies stream into the panel, tool calls wait for your approval, and file edits open as VS Code diffs that you can keep or undo. Sessions remain available after you restart VS Code.
 
-> **Preview:** This independent open source extension is under active development. Features can change as the Devin CLI evolves.
+> **Coder fork:** This build uses the extension ID `wsj3000.devin-vscode` so an automatic update cannot replace it with the upstream build. It discovers Devin CLI sessions across VS Code windows and can resume the newest discovered session.
 
 ## See it in action
 
@@ -35,10 +33,10 @@ Before installing the extension, confirm these requirements:
 
 ## Install the extension
 
-1. Install **Devin for VS Code** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=shayanline.devin-vscode), or run:
+1. Download the `.vsix` from the fork's [latest release](https://github.com/wsj3000/devin-vscode/releases/latest), then run:
 
    ```sh
-   code --install-extension shayanline.devin-vscode
+   code --install-extension devin-vscode-0.13.1.vsix
    ```
 
 2. Install the [Devin CLI](https://docs.devin.ai/cli) if it is not already available.
@@ -127,7 +125,7 @@ Long running commands can continue in the background while Devin works on the ne
 
 Run **Devin: Open Settings** from the Command Palette to manage the Devin CLI configuration in a built in editor. It supports instructions, skills, plugins, MCP servers, hooks, permissions, and other CLI options at machine or workspace scope. Changes are written to the CLI configuration that the `devin` command uses in your terminal.
 
-To configure the extension itself, open VS Code Settings and search for `@ext:shayanline.devin-vscode`. Available options include session behaviour, editor context, reasoning display, checkpoints, command execution, and the CLI executable path.
+To configure the extension itself, open VS Code Settings and search for `@ext:wsj3000.devin-vscode`. Available options include session behaviour, editor context, reasoning display, checkpoints, command execution, and the CLI executable path.
 
 ## Data and privacy
 
