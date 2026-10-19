@@ -106,7 +106,9 @@ Checkpoint and fork controls appear when your Devin CLI supports them.
 
 ## Manage chats and sessions
 
-Sessions are saved per workspace and remain available after VS Code restarts. Open **Devin: Session List** from the Command Palette to search sessions, filter by status, or return to an earlier chat.
+Sessions remain available after VS Code restarts. The session list also discovers chats created by another VS Code window that uses the same Devin CLI data, including windows opened from a different working directory. Open **Devin: Session List** from the Command Palette to search sessions, filter by status, or return to an earlier chat.
+
+Enable `devin.autoResumeLast` to reopen the most recent session when the sidebar starts. A new VS Code window discovers existing CLI sessions before choosing the latest one, so this also works when its workspace storage is initially empty. If that session is still open in another window, the extension asks before taking over its CLI lock.
 
 Useful shortcuts include:
 
@@ -133,7 +135,7 @@ The extension starts your installed Devin CLI on your computer and communicates 
 
 Prompts, selected code, attached files and images, editor diagnostics, tool responses, and other context you provide are passed to Devin CLI. The CLI can communicate with Cognition services and any MCP servers you configure. Their data handling depends on your Devin account, organization settings, deployment, and the services you connect. Review [Cognition security and privacy guidance](https://docs.devin.ai/admin/security) before using sensitive data.
 
-The extension stores session identifiers, titles, cached session details, and unsent drafts in VS Code workspace storage. It can also store staged attachment contents and original file contents needed for pending **Keep** or **Undo** actions in VS Code extension storage. Devin CLI manages full conversation history, authentication, and its own configuration separately.
+The extension stores session identifiers, titles, cached session details, and unsent drafts in VS Code workspace storage. It discovers existing sessions from the Devin CLI when that workspace storage is empty. It can also store staged attachment contents and original file contents needed for pending **Keep** or **Undo** actions in VS Code extension storage. Devin CLI manages full conversation history, authentication, and its own configuration separately.
 
 Remove secrets and unnecessary personal or customer data before attaching context. Review tool permissions and the data policies of configured MCP servers before approving access.
 

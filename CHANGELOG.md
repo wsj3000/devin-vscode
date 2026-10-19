@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.1] - 2026-10-19
+
+### Highlights
+- Discover and resume CLI sessions created in another VS Code window.
+
 ## [0.13.0] - 2026-10-01
 
 ### Highlights

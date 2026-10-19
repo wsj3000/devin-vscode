@@ -42,6 +42,7 @@ import { StatusBar } from "../ui/statusBar";
 import { checkHealth, CliHealth, loginShellEnv } from "../cli/locate";
 import { cachedFamilies, familyOf, listModelFamilies, ModelFamily } from "../cli/models";
 import { lockOwner, removeLock } from "../cli/sessionLocks";
+import { withQueryClient } from "../acp/queryClient";
 
 // One live session: its own `devin acp` process and terminal manager, plus the
 // per-session state that used to be flat on the provider. Several of these can
@@ -1794,12 +1795,17 @@ export class ChatController implements AcpHost {
     // the session the panel was showing is reopened: without that, the chat you
     // were reading comes back blank until you go to the list and pick it again.
     const viewing = this.store.viewing();
-    const last = viewing || this.store.activeId();
+    const autoResume = this.cfg().get<boolean>("autoResumeLast", false);
+    let last = viewing || this.store.activeId();
+    if (!last && autoResume) {
+      await this.refreshSessions(true);
+      last = this.sessionsCache?.sessions[0]?.id;
+    }
     // Always reopen a session whose turn we had to kill on the way out, even
     // when auto-resume is off: landing on the session list with no word of the
     // interruption is the one case where it is genuinely confusing.
     const wasInterrupted = !!last && this.store.interrupted().includes(last);
-    const resume = !!viewing || wasInterrupted || this.cfg().get<boolean>("autoResumeLast", false);
+    const resume = !!viewing || wasInterrupted || autoResume;
     // Another surface may already be running it (an editor tab that outlived a
     // reload), in which case it belongs there and this panel stays on the list.
     const heldElsewhere = !!last && !!this.surfaces?.owner(last, this);
@@ -2645,42 +2651,38 @@ export class ChatController implements AcpHost {
   // `devin list` repeatedly.
   // `staleOk` serves the cache at any age (used when returning to the list, so it
   // paints instantly) and is paired with a background revalidate.
-  // List through a live agent when there is one, which costs no process at all,
-  // rather than spawning `devin list` once per directory. Returns undefined when
-  // nothing is live, leaving the CLI path to answer a cold panel (measured at
-  // roughly the same cost as spawning an agent purely to ask, so there is nothing
-  // to gain by starting one).
-  private listOverProtocol(): Promise<ListResult> | undefined {
+  // List through a live agent when there is one, which costs no process at all.
+  // A cold window starts a short lived ACP client because its unscoped session list
+  // is the only way to discover chats created in a different working directory.
+  private async listOverProtocol(): Promise<ListResult> {
     const client = this.anyLiveClient() || this.surfaces?.sessionListClient(this);
-    if (!client) {
-      return undefined;
-    }
     const ids = this.store.ids();
-    return client
-      .listSessions(SESSION_LIST_ACP_TIMEOUT_MS)
-      .then((rows) => {
-        // No rows at all, from an agent that has a session of its own to report, is
-        // not an answer about the user's sessions: it is the call not working (a
-        // renamed field after a CLI upgrade, a reset store). Fall back rather than
-        // paint an empty list.
-        if (!rows.length && ids.length) {
-          throw new Error("session/list answered with no sessions");
-        }
-        return fromAcpRows(rows, ids);
-      })
-      .catch((err) => {
-        // An agent that cannot answer must not empty the list: fall back for this
-        // refresh and let the next one try again.
-        this.log(`[list-over-acp-failed] ${err instanceof Error ? err.message : String(err)}`);
-        return listSessions({
-          cliPath: this.resolvedCli || "devin",
-          env: this.clientEnv(),
-          timeoutMs: SESSION_LIST_CLI_TIMEOUT_MS,
-          folders: this.folders(),
-          trackedIds: ids,
-          cwdById: this.store.cwds()
-        });
+    try {
+      const rows = client
+        ? await client.listSessions(SESSION_LIST_ACP_TIMEOUT_MS)
+        : await withQueryClient(
+          this.resolvedCli || "devin",
+          this.cwd(),
+          this.clientEnv(),
+          (query) => query.listSessions(SESSION_LIST_ACP_TIMEOUT_MS)
+        );
+      if (!rows || (!rows.length && ids.length)) {
+        throw new Error("session/list answered with no sessions");
+      }
+      return fromAcpRows(rows, ids);
+    } catch (err) {
+      // An agent that cannot answer must not empty the list: fall back for this
+      // refresh and let the next one try again.
+      this.log(`[list-over-acp-failed] ${err instanceof Error ? err.message : String(err)}`);
+      return listSessions({
+        cliPath: this.resolvedCli || "devin",
+        env: this.clientEnv(),
+        timeoutMs: SESSION_LIST_CLI_TIMEOUT_MS,
+        folders: this.folders(),
+        trackedIds: ids,
+        cwdById: this.store.cwds()
       });
+    }
   }
 
   // Any agent that has finished initialize, since `session/list` belongs to the
@@ -2744,17 +2746,8 @@ export class ChatController implements AcpHost {
       // Never let a slow/failed `devin list` leave the list stuck on its
       // spinner: cap the wait and fall back to the cache (or empty).
       try {
-        const protocol = this.listOverProtocol();
-        source = protocol ? "acp" : "cli";
-        const listing = protocol || listSessions({
-          cliPath: this.resolvedCli || "devin",
-          env: this.clientEnv(),
-          timeoutMs: SESSION_LIST_CLI_TIMEOUT_MS,
-          folders,
-          trackedIds: this.store.ids(),
-          cwdById: this.store.cwds()
-        });
-        const { sessions: live, prunedIds } = await listing;
+        source = "acp";
+        const { sessions: live, prunedIds } = await this.listOverProtocol();
         // Drop tracked ids Devin no longer knows about so stale rows self-heal,
         // but NEVER prune a session we still hold a live runtime for (or are
         // starting): a freshly created session is not in `devin list` until its
@@ -2766,7 +2759,12 @@ export class ChatController implements AcpHost {
             void this.dropStaged(id);
           }
         }
-        sessions = live;
+        for (const evicted of await this.store.importSessions(live)) {
+          if (!this.runtimes.has(evicted) && !this.surfaces?.owner(evicted)) {
+            void this.dropStaged(evicted);
+          }
+        }
+        sessions = live.map((session) => ({ ...session, tracked: true }));
         this.sessionsCache = { at: Date.now(), sessions };
         this.store.cacheSessionList(this.sessionsCache);
       } catch (err) {

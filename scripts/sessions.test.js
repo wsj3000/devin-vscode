@@ -60,18 +60,22 @@ function slowListCli(state, delay = 200) {
   return file;
 }
 
-test("an empty tracked list does not start the CLI", posixOnly, async () => {
+test("an empty tracked list discovers CLI sessions in the workspace", posixOnly, async () => {
   const log = path.join(TMP, "empty-list.log");
+  const cli = path.join(TMP, `discover-${Date.now()}.js`);
+  fs.writeFileSync(cli, `#!/usr/bin/env node\nrequire("fs").appendFileSync(process.env.LIST_LOG, process.cwd() + "\\n");\nprocess.stdout.write(JSON.stringify([{ id: "existing", short_id: "existing", working_directory: process.cwd(), title: "Existing chat" }]));\n`);
+  fs.chmodSync(cli, 0o755);
   const result = await listSessions({
-    cliPath: listCli(log),
+    cliPath: cli,
     env: { ...process.env, LIST_LOG: log },
     trackedIds: [],
     cwdById: {},
     folders: [TMP]
   });
 
-  assert.deepStrictEqual(result, { sessions: [], prunedIds: [] });
-  assert.strictEqual(fs.existsSync(log), false, "no CLI list process is needed");
+  assert.deepStrictEqual(result.sessions.map((session) => session.id), ["existing"]);
+  assert.strictEqual(result.sessions[0].tracked, false, "the caller can identify a discovered session");
+  assert.strictEqual(fs.readFileSync(log, "utf8").trim(), fs.realpathSync(TMP));
 });
 
 test("a session the agent did not mention is pruned, unless it mentioned none at all", () => {
@@ -116,7 +120,7 @@ test("a session that is gone takes its interrupted mark and its title with it", 
   assert.deepStrictEqual(store.titles(), {}, "and no name kept for it for ever");
 });
 
-test("known session directories do not also list workspace roots", posixOnly, async () => {
+test("known session directories and workspace roots are both listed", posixOnly, async () => {
   const known = fs.mkdtempSync(path.join(TMP, "known-"));
   const extra = fs.mkdtempSync(path.join(TMP, "extra-"));
   const log = path.join(TMP, "known-list.log");
@@ -129,7 +133,18 @@ test("known session directories do not also list workspace roots", posixOnly, as
   });
 
   const listed = fs.readFileSync(log, "utf8").trim().split("\n").sort();
-  assert.deepStrictEqual(listed, [fs.realpathSync(known)]);
+  assert.deepStrictEqual(listed, [fs.realpathSync(extra), fs.realpathSync(known)]);
+});
+
+test("ACP discovery returns sessions that this window did not track", () => {
+  const result = fromAcpRows([
+    { sessionId: "tracked", cwd: "/old", title: "Known", updatedAt: "2026-08-15T10:00:00Z" },
+    { sessionId: "existing", cwd: "/elsewhere", title: "Existing", updatedAt: "2026-08-16T10:00:00Z" }
+  ], ["tracked"]);
+
+  assert.deepStrictEqual(result.sessions.map((session) => session.id), ["existing", "tracked"]);
+  assert.strictEqual(result.sessions[0].tracked, false);
+  assert.strictEqual(result.sessions[1].tracked, true);
 });
 
 test("CLI fallback limits concurrent session list processes", posixOnly, async () => {
@@ -180,6 +195,20 @@ test("adding a session reports the tracked ids it evicts", () => {
   }
 
   assert.deepStrictEqual(store.add("new", "/w"), ["s0"]);
+});
+
+test("importing discovered sessions keeps their activity order and directories", async () => {
+  const store = new SessionStore(memento());
+  store.add("known", "/known");
+
+  await store.importSessions([
+    { id: "newest", short_id: "newest", working_directory: "/newest" },
+    { id: "older", short_id: "older", working_directory: "/older" },
+    { id: "known", short_id: "known", working_directory: "/known" }
+  ]);
+
+  assert.deepStrictEqual(store.ids(), ["newest", "older", "known"]);
+  assert.deepStrictEqual(store.cwds(), { known: "/known", newest: "/newest", older: "/older" });
 });
 
 test("removing a session also removes its cached list row", () => {

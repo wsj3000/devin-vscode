@@ -27,11 +27,11 @@ export function shutdownQueryAgents(): Promise<void[]> {
   return Promise.all([...live].map((c) => c.shutdown().catch(() => undefined) as Promise<void>));
 }
 
-export async function withQuerySession<T>(
+export async function withQueryClient<T>(
   cliPath: string,
   cwd: string,
   env: NodeJS.ProcessEnv | undefined,
-  work: (client: AcpClient, sessionId: string) => Promise<T>
+  work: (client: AcpClient) => Promise<T>
 ): Promise<T | undefined> {
   if (stopping) {
     return undefined;
@@ -52,22 +52,32 @@ export async function withQuerySession<T>(
     killTerminal: (_: TerminalRef) => ({}),
     releaseTerminal: (_: TerminalRef) => ({})
   });
-  let sessionId = "";
   try {
     client.start();
     await client.initialize();
-    const session = await client.newSession(cwd);
-    sessionId = session.sessionId;
-    return await work(client, sessionId);
+    return await work(client);
   } catch {
     // Every caller has a fallback for this (the file scan it used to do), so a
     // failure here is not worth a message of its own.
     return undefined;
   } finally {
-    if (sessionId) {
-      await client.deleteSession(sessionId).catch(() => undefined);
-    }
     await client.shutdown().catch(() => undefined);
     live.delete(client);
   }
+}
+
+export async function withQuerySession<T>(
+  cliPath: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv | undefined,
+  work: (client: AcpClient, sessionId: string) => Promise<T>
+): Promise<T | undefined> {
+  return withQueryClient(cliPath, cwd, env, async (client) => {
+    const session = await client.newSession(cwd);
+    try {
+      return await work(client, session.sessionId);
+    } finally {
+      await client.deleteSession(session.sessionId).catch(() => undefined);
+    }
+  });
 }

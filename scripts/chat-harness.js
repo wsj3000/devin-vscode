@@ -175,7 +175,7 @@ process.stdin.on("data", async (chunk) => {
         reply({ stopReason: "end_turn" });
         break;
       case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
-      case "session/list": reply({ sessions: [] }); break;
+      case "session/list": reply({ sessions: JSON.parse(process.env.DV_LIST_SESSIONS || "[]") }); break;
       default: reply({});
     }
   }
@@ -243,7 +243,8 @@ function createChat(opts = {}) {
     DV_LOAD_DELAY: String(opts.loadDelay || 0),
     DV_PROMPT_DELAY: String(opts.promptDelay || 0),
     DV_STEPS_DELAY: String(opts.stepsDelay || 0),
-    DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : ""
+    DV_DOCUMENT_LIFECYCLE: opts.documentLifecycle ? "1" : "",
+    DV_LIST_SESSIONS: JSON.stringify(opts.sessions || [])
   };
   globalThis.__dvConfig = Object.assign(
     {

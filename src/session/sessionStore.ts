@@ -216,6 +216,32 @@ export class SessionStore {
     return evicted;
   }
 
+  async importSessions(sessions: DevinSession[]): Promise<string[]> {
+    const current = this.ids();
+    const known = new Set(current);
+    const discovered = sessions.filter((session) => session.id && !known.has(session.id));
+    if (!discovered.length) {
+      return [];
+    }
+    const all = [...discovered.map((session) => session.id), ...current];
+    const ids = all.slice(0, 200);
+    const evicted = all.slice(200);
+    const cwds = this.cwds();
+    for (const session of discovered) {
+      if (session.working_directory) {
+        cwds[session.id] = session.working_directory;
+      }
+    }
+    await Promise.all([
+      this.state.update(SessionStore.IDS_KEY, ids),
+      this.state.update(SessionStore.CWDS_KEY, cwds)
+    ]);
+    this.pruneCwds(ids);
+    this.pruneDrafts(ids);
+    this.pruneSessionList(ids);
+    return evicted;
+  }
+
   private pruneCwds(ids: string[]): void {
     const keep = new Set(ids);
     const cwds = this.cwds();

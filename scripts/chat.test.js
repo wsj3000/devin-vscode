@@ -14,6 +14,8 @@
 
 const test = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { createChat, cleanup } = require("./chat-harness");
 
@@ -668,6 +670,39 @@ test("a visible session list loads its initial rows", posixOnly, async () => {
   const listed = await h.until(() => h.postsOf("sessions").length === 1, 2000);
 
   assert.ok(listed, "the visible list receives its initial session rows");
+  await h.dispose();
+});
+
+test("a cold window discovers and remembers an existing CLI session", posixOnly, async () => {
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "devin-existing-"));
+  const h = createChat({
+    sessions: [{ sessionId: "existing", cwd: external, title: "Existing chat", updatedAt: "2026-08-16T10:00:00Z" }]
+  });
+  await h.ready();
+  h.send({ type: "listVisible", value: true });
+
+  const listed = await h.until(() => h.last("sessions")?.sessions.some((session) => session.id === "existing"), 4000);
+
+  assert.ok(listed, "the session from another window appears");
+  assert.strictEqual(h.store.cwds().existing, external, "the directory needed to reopen it is remembered");
+  await h.dispose();
+});
+
+test("auto resume discovers the newest CLI session in a cold window", posixOnly, async () => {
+  const external = fs.mkdtempSync(path.join(os.tmpdir(), "devin-existing-"));
+  const h = createChat({
+    config: { autoResumeLast: true },
+    sessions: [
+      { sessionId: "older", cwd: external, title: "Older", updatedAt: "2026-08-15T10:00:00Z" },
+      { sessionId: "newest", cwd: external, title: "Newest", updatedAt: "2026-08-16T10:00:00Z" }
+    ]
+  });
+
+  await h.ready();
+  const loaded = await h.until(() => h.agentSaw("session/load").some((message) => message.params.sessionId === "newest"), 5000);
+
+  assert.ok(loaded, "the newest discovered session is resumed");
+  assert.strictEqual(h.activeId(), "newest");
   await h.dispose();
 });
 

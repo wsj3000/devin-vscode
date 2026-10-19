@@ -16,16 +16,16 @@ interface ListOptions {
   cliPath: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
-  // Session ids this VS Code window owns (from workspaceState).
+  // Session ids this VS Code window already knows (from workspaceState).
   trackedIds: string[];
   // Exact directory each tracked id was created in.
   cwdById: Record<string, string>;
-  // Workspace folders, queried as a fallback for ids with no recorded cwd.
+  // Workspace folders, queried to discover sessions created by another window.
   folders: string[];
 }
 
 export interface ListResult {
-  // Tracked sessions that still exist in Devin, with fresh metadata.
+  // Sessions Devin knows about, including ones this window just discovered.
   sessions: DevinSession[];
   // Tracked ids Devin no longer knows about, safe to drop from the store.
   prunedIds: string[];
@@ -33,29 +33,19 @@ export interface ListResult {
 
 const LIST_CONCURRENCY = 4;
 
-// Membership is workspaceState (tracked ids); the CLI is only the source of
-// truth for existence and metadata. `devin list --format json` is exact-match
-// on cwd, so we query each distinct directory a tracked session was created in,
-// then keep only the tracked ids the CLI still returns. Ids whose directory was
-// queried successfully but no longer contains them are pruned; ids whose query
-// failed are left untouched so a transient CLI error never wipes the list.
+// `devin list --format json` is exact-match on cwd, so query every workspace
+// folder plus each directory remembered for an existing session. Ids whose
+// directory was queried successfully but no longer contains them are pruned.
+// Failed directories are left untouched so a transient error never wipes the list.
 export async function listSessions(opts: ListOptions): Promise<ListResult> {
-  if (!opts.trackedIds.length) {
-    return { sessions: [], prunedIds: [] };
-  }
   const dirs = new Set<string>();
-  let missingCwd = false;
+  for (const folder of opts.folders) {
+    dirs.add(folder);
+  }
   for (const id of opts.trackedIds) {
     const cwd = opts.cwdById[id];
     if (cwd) {
       dirs.add(cwd);
-    } else {
-      missingCwd = true;
-    }
-  }
-  if (missingCwd) {
-    for (const f of opts.folders) {
-      dirs.add(f);
     }
   }
   if (dirs.size === 0) {
@@ -87,12 +77,15 @@ export async function listSessions(opts: ListOptions): Promise<ListResult> {
     }
   });
 
-  const sessions: DevinSession[] = [];
+  const tracked = new Set(opts.trackedIds);
+  const sessions: DevinSession[] = [...byId.values()].map((session) => ({
+    ...session,
+    tracked: tracked.has(session.id)
+  }));
   const prunedIds: string[] = [];
   for (const id of opts.trackedIds) {
     const found = byId.get(id);
     if (found) {
-      sessions.push({ ...found, tracked: true });
       continue;
     }
     // Absent: prune only if the directory we expected it in was queried
@@ -108,17 +101,23 @@ export async function listSessions(opts: ListOptions): Promise<ListResult> {
   return { sessions, prunedIds };
 }
 
-// The same listing, taken from a live agent over ACP (`session/list`) instead of
-// by spawning `devin list` once per directory. Preferred whenever a session is
-// open, which is most of the time the list is looked at, and it is better as well
-// as cheaper: the protocol call is not scoped to a directory, so a tracked session
-// created in a subdirectory of the workspace is found rather than silently missing.
+// The same listing, taken over ACP (`session/list`) instead of by spawning
+// `devin list` once per directory. The protocol call is not scoped to a directory,
+// so it can find a session created by another VS Code window or workspace folder.
 //
-// Membership is unchanged: the ids this window tracks, and only those. An untracked
-// session (one started by `devin` in a terminal) is deliberately still not listed.
+// Return every session so a new VS Code window can discover chats created by another
+// window. The tracked flag lets the caller persist the directory needed to reopen it.
 export function fromAcpRows(rows: AcpSessionRow[], trackedIds: string[]): ListResult {
   const byId = new Map(rows.filter((r) => r && r.sessionId).map((r) => [r.sessionId, r]));
-  const sessions: DevinSession[] = [];
+  const tracked = new Set(trackedIds);
+  const sessions: DevinSession[] = [...byId.values()].map((row) => ({
+    id: row.sessionId,
+    short_id: row.sessionId,
+    working_directory: row.cwd || "",
+    last_activity_at: epochSeconds(row.updatedAt),
+    title: row.title,
+    tracked: tracked.has(row.sessionId)
+  }));
   const prunedIds: string[] = [];
   // An agent that can answer this at all has at least its own session to report, so
   // no rows is a protocol answer that cannot be true, not a fact about the user's
@@ -137,14 +136,6 @@ export function fromAcpRows(rows: AcpSessionRow[], trackedIds: string[]): ListRe
       }
       continue;
     }
-    sessions.push({
-      id,
-      short_id: id,
-      working_directory: row.cwd || "",
-      last_activity_at: epochSeconds(row.updatedAt),
-      title: row.title,
-      tracked: true
-    });
   }
   sessions.sort((a, b) => (b.last_activity_at || 0) - (a.last_activity_at || 0));
   return { sessions, prunedIds };
