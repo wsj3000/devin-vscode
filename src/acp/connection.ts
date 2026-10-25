@@ -21,6 +21,7 @@ export class JsonRpcConnection {
   private buffer = "";
   private discardingFrame = false;
   private stderr = "";
+  private discardingStderr = false;
   private closed = false;
 
   constructor(
@@ -81,6 +82,14 @@ export class JsonRpcConnection {
   }
 
   private onStderr(chunk: string): void {
+    if (this.discardingStderr) {
+      const index = chunk.indexOf("\n");
+      if (index < 0) {
+        return;
+      }
+      this.discardingStderr = false;
+      chunk = chunk.slice(index + 1);
+    }
     this.stderr += chunk;
     let index: number;
     while ((index = this.stderr.indexOf("\n")) >= 0) {
@@ -97,6 +106,7 @@ export class JsonRpcConnection {
     }
     if (this.stderr.length > MAX_STDERR_CHARS) {
       this.stderr = "";
+      this.discardingStderr = true;
       this.onLog?.("[protocol-error] ACP stderr line exceeded 64 KiB");
     }
   }

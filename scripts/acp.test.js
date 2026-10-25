@@ -141,6 +141,15 @@ async function settle(ms = 150) {
   await new Promise((r) => setTimeout(r, ms));
 }
 
+async function until(predicate, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await settle(10);
+  }
+  return predicate();
+}
+
 test("concurrent login shell lookups share one process", { skip: process.platform === "win32" }, async () => {
   const shell = path.join(TMP, "slow-shell.sh");
   const log = path.join(TMP, "shell.log");
@@ -224,13 +233,19 @@ test("ACP stderr keeps actionable lines without credentials", async () => {
 
 test("ACP stdout drops an oversized unterminated frame", async () => {
   const { spawn } = require("child_process");
-  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1)); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-e", `
+    process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1));
+    process.stdin.once('data', () => process.stdout.write('discarded tail\\n' + JSON.stringify({ jsonrpc: '2.0', method: 'recovered' }) + '\\n'));
+  `], { stdio: ["pipe", "pipe", "pipe"] });
   const logs = [];
-  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  const notifications = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), (method) => notifications.push(method), (line) => logs.push(line));
   try {
-    await settle(300);
-    assert.strictEqual(conn.buffer, "");
-    assert.ok(logs.some((line) => line.includes("frame exceeded")));
+    assert.ok(await until(() => logs.some((line) => line.includes("frame exceeded"))), "the oversized frame is discarded");
+    assert.strictEqual(conn.buffer.length, 0);
+    child.stdin.write("continue\n");
+    assert.ok(await until(() => notifications.includes("recovered")), "the next frame is still parsed");
+    assert.deepStrictEqual(logs, ["[protocol-error] ACP frame exceeded 8 MiB"]);
   } finally {
     conn.dispose();
     child.kill("SIGKILL");
@@ -239,12 +254,16 @@ test("ACP stdout drops an oversized unterminated frame", async () => {
 
 test("ACP stdout drops an oversized complete frame", async () => {
   const { spawn } = require("child_process");
-  const child = spawn(process.execPath, ["-e", "process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1) + '\\n'); setTimeout(() => {}, 1000)"], { stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(process.execPath, ["-e", `
+    process.stdout.write('x'.repeat(8 * 1024 * 1024 + 1) + '\\n' + JSON.stringify({ jsonrpc: '2.0', method: 'recovered' }) + '\\n');
+  `], { stdio: ["pipe", "pipe", "pipe"] });
   const logs = [];
-  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  const notifications = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), (method) => notifications.push(method), (line) => logs.push(line));
   try {
-    await settle(300);
-    assert.ok(logs.some((line) => line.includes("frame exceeded")));
+    assert.ok(await until(() => notifications.includes("recovered")), "the next frame is still parsed");
+    assert.deepStrictEqual(logs, ["[protocol-error] ACP frame exceeded 8 MiB"]);
+    assert.strictEqual(conn.buffer.length, 0);
   } finally {
     conn.dispose();
     child.kill("SIGKILL");
@@ -257,9 +276,27 @@ test("ACP stderr drops an oversized unterminated line", async () => {
   const logs = [];
   const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
   try {
-    await settle(150);
-    assert.strictEqual(conn.stderr, "");
-    assert.ok(logs.some((line) => line.includes("stderr line exceeded")));
+    assert.ok(await until(() => logs.some((line) => line.includes("stderr line exceeded"))), "the oversized line is discarded");
+    assert.strictEqual(conn.stderr.length, 0);
+  } finally {
+    conn.dispose();
+    child.kill("SIGKILL");
+  }
+});
+
+test("ACP stderr discards the tail of an oversized line and keeps the next warning", async () => {
+  const { spawn } = require("child_process");
+  const child = spawn(process.execPath, ["-e", `
+    process.stderr.write('x'.repeat(64 * 1024 + 1));
+    process.stdin.once('data', () => process.stderr.write('WARN discarded tail\\nWARN next valid line\\n'));
+  `], { stdio: ["pipe", "pipe", "pipe"] });
+  const logs = [];
+  const conn = new JsonRpcConnection(child, async () => ({}), () => {}, (line) => logs.push(line));
+  try {
+    assert.ok(await until(() => logs.some((line) => line.includes("stderr line exceeded"))), "the oversized line is discarded");
+    child.stdin.write("continue\n");
+    assert.ok(await until(() => logs.includes("WARN next valid line")), "parsing resumes after the newline");
+    assert.deepStrictEqual(logs, ["[protocol-error] ACP stderr line exceeded 64 KiB", "WARN next valid line"]);
   } finally {
     conn.dispose();
     child.kill("SIGKILL");

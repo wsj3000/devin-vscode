@@ -121,7 +121,7 @@ const configOptions = () => [
 ];
 let buf = "";
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", async (chunk) => {
+process.stdin.on("data", (chunk) => {
   buf += chunk;
   let i;
   while ((i = buf.indexOf("\\n")) !== -1) {
@@ -136,51 +136,54 @@ process.stdin.on("data", async (chunk) => {
       try { require("fs").appendFileSync(process.env.DV_LOG, JSON.stringify({ ...msg, _agent: process.pid }) + "\\n"); } catch {}
     }
     if (msg.id === undefined) continue;
-    const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
-    switch (msg.method) {
-      case "initialize":
-        reply({
-          protocolVersion: 1,
-          agentCapabilities: {
-            loadSession: true,
-            promptCapabilities: { image: true, embeddedContext: true },
-            _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
-          }
-        });
-        break;
-      case "session/new": {
-        const newId = idBase + "-" + ++seq;
-        // The real agent announces the session's mode before it answers, so this
-        // update arrives while its runtime is not yet in the pool to be found by
-        // id. Anything that answers such an update with "whatever is on screen"
-        // paints one chat's settings into another's.
-        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
-        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: JSON.parse(process.env.DV_COMMANDS || "[]") } } });
-        await delay(num("DV_NEW_DELAY"));
-        reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
-        break;
-      }
-      case "session/set_config_option":
-        if (msg.params.configId === "model") currentModel = msg.params.value;
-        if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
-        reply({ configOptions: configOptions() });
-        break;
-      case "session/load":
-        await delay(num("DV_LOAD_DELAY"));
-        reply({});
-        break;
-      case "session/prompt":
-        // Long by default: a turn is running until the test says otherwise, which is
-        // what makes "busy" states reachable.
-        await delay(num("DV_PROMPT_DELAY") || 60000);
-        reply({ stopReason: "end_turn" });
-        break;
-      case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
-      case "session/list": reply({ sessions: JSON.parse(process.env.DV_LIST_SESSIONS || "[]") }); break;
-      default: reply({});
-    }
+    void respond(msg);
   }
 });
+async function respond(msg) {
+  const reply = (result) => send({ jsonrpc: "2.0", id: msg.id, result });
+  switch (msg.method) {
+    case "initialize":
+      reply({
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { image: true, embeddedContext: true },
+          _meta: { "cognition.ai/revert": true, "cognition.ai/sessionShare": true, ...(process.env.DV_DOCUMENT_LIFECYCLE === "1" ? { "cognition.ai/documentLifecycle": true } : {}) }
+        }
+      });
+      break;
+    case "session/new": {
+      const newId = idBase + "-" + ++seq;
+      // The real agent announces the session's mode before it answers, so this
+      // update arrives while its runtime is not yet in the pool to be found by
+      // id. Anything that answers such an update with "whatever is on screen"
+      // paints one chat's settings into another's.
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "current_mode_update", currentModeId: process.env.DV_MODE || "default" } } });
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: newId, update: { sessionUpdate: "available_commands_update", availableCommands: JSON.parse(process.env.DV_COMMANDS || "[]") } } });
+      await delay(num("DV_NEW_DELAY"));
+      reply({ sessionId: newId, modes: { currentModeId: process.env.DV_MODE || "default", availableModes: [{ id: "default", name: "Default" }, { id: "plan", name: "Plan" }] }, configOptions: configOptions() });
+      break;
+    }
+    case "session/set_config_option":
+      if (msg.params.configId === "model") currentModel = msg.params.value;
+      if (msg.params.configId === "thought_level") currentThoughtLevel = msg.params.value;
+      reply({ configOptions: configOptions() });
+      break;
+    case "session/load":
+      await delay(num("DV_LOAD_DELAY"));
+      reply({});
+      break;
+    case "session/prompt":
+      // Long by default: a turn is running until the test says otherwise, which is
+      // what makes "busy" states reachable.
+      await delay(num("DV_PROMPT_DELAY") || 60000);
+      reply({ stopReason: "end_turn" });
+      break;
+    case "_cognition.ai/revert/listSteps": await delay(num("DV_STEPS_DELAY")); reply({ steps: [] }); break;
+    case "session/list": reply({ sessions: JSON.parse(process.env.DV_LIST_SESSIONS || "[]") }); break;
+    default: reply({});
+  }
+}
 process.stdin.on("end", () => process.exit(0));
 `;
 

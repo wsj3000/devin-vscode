@@ -1828,7 +1828,32 @@ test("a model change cannot paint the session that replaced the one it was for",
   }
 });
 
+test("configuration is answered when a pending prompt shares its pipe chunk", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "" } });
+  try {
+    await h.ready();
+    const rt = await h.controller.createSession();
+    const stdin = rt.client.child.stdin;
+    const write = stdin.write;
+    const frames = [];
+    let confirmed;
+    try {
+      stdin.write = (frame) => { frames.push(frame); return true; };
+      void rt.client.prompt(rt.id, [{ type: "text", text: "held prompt" }]).catch(() => {});
+      void rt.client.setConfigOption(rt.id, "thought_level", "low").then((result) => { confirmed = result; }, () => {});
+    } finally {
+      stdin.write = write;
+    }
+    stdin.write(frames.join(""));
+    assert.ok(await h.until(() => confirmed), "configuration is answered while the prompt is still pending");
+    assert.strictEqual(confirmed.configOptions.find((option) => option.id === "thought_level").currentValue, "low");
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("a pick made before any session persists its defaults and applies once one starts", posixOnly, async () => {
+  const h = createChat({ newDelay: 300, config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
   const vscode = globalThis.__dvVscode;
   const writes = [];
   const realGetConfiguration = vscode.workspace.getConfiguration;
@@ -1840,7 +1865,6 @@ test("a pick made before any session persists its defaults and applies once one 
     },
     update: async (key, value) => { writes.push([key, value]); }
   });
-  const h = createChat({ newDelay: 300, config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
   try {
     await h.ready();
 

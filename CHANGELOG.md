@@ -8,6 +8,13 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.9] - 2026-10-25
+
+### Under the hood
+- Discard oversized CLI log lines through their final newline.
+- Wait for protocol and rendering results in regression tests.
+- Handle batched requests independently in the test agent.
+
 ## [0.13.8] - 2026-10-25
 
 ### Highlights
