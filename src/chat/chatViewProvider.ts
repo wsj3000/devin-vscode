@@ -162,6 +162,8 @@ export interface RuntimeTransfer {
 // a session, how to move one, and how to bring one to the front. Implemented by
 // the ChatManager, which is the only thing that knows about all the surfaces.
 export interface SurfaceHost {
+  toggleMaximize?(controller: ChatController, body: "thread" | "list"): Promise<void>;
+  isMaximized?(controller: ChatController): boolean;
   // Move a session to a new editor tab, or back to the side panel.
   detach(id: string): Promise<void>;
   attach(id: string): Promise<void>;
@@ -598,8 +600,8 @@ export class ChatController implements AcpHost {
   // Hand the webview the unsent text stored for whichever composer it is showing
   // (a session's own, or the "new chat" box when there is none). The id travels
   // with it so a late arrival for a session already left is ignored.
-  private postDraft(): void {
-    this.post({ type: "draft", id: this.activeId || null, text: this.store.draft(this.activeId) });
+  private postDraft(replace = false): void {
+    this.post({ type: "draft", id: this.activeId || null, text: this.store.draft(this.activeId), ...(replace ? { replace: true } : {}) });
   }
 
   // Part way through answering a question, remembered against the request so it
@@ -748,6 +750,21 @@ export class ChatController implements AcpHost {
     } else {
       void vscode.commands.executeCommand("devin.chatView.focus");
     }
+  }
+
+  setMaximized(maximized: boolean, pending = false): void {
+    this.post({ type: "maximized", value: maximized, pending });
+  }
+
+  async moveEmptyComposer(to: ChatController, body: "thread" | "list"): Promise<void> {
+    await this.flushSurfaceState();
+    to.activeId = undefined;
+    to.staged.set(to.stagedKey(undefined), this.stagedFor(undefined));
+    this.staged.delete(this.stagedKey(undefined));
+    to.post({ type: "clear", reset: true });
+    to.post({ type: "body", body });
+    to.postDraft(true);
+    to.postStaged();
   }
 
   // Kill every live ACP process (and its terminals) so a window reload or
@@ -1569,6 +1586,9 @@ export class ChatController implements AcpHost {
         case "detachSession":
           await this.surfaces?.detach(String(msg.id || this.activeId || ""));
           return;
+        case "toggleMaximize":
+          await this.surfaces?.toggleMaximize?.(this, msg.body === "list" ? "list" : "thread");
+          return;
         case "attachSession":
           await this.surfaces?.attach(String(msg.id || this.activeId || ""));
           return;
@@ -1777,7 +1797,7 @@ export class ChatController implements AcpHost {
   }
 
   private async restoreAfterReady(): Promise<void> {
-    if (this.closed || !this.isReady() || this.activeId) {
+    if (this.closed || !this.isReady() || this.activeId || this.surfaces?.isMaximized?.(this)) {
       return;
     }
     // A freshly opened editor/window surface starts a new session immediately
@@ -2458,10 +2478,7 @@ export class ChatController implements AcpHost {
     this.markVisible(id);
     this.sendOpenDocuments(rt);
     this.postWorkingSet();
-    // The composer belongs to this chat now, so it shows this chat's own unsent
-    // text and staged files, not the ones from wherever we just were.
     await this.loadStaged(id);
-    this.postDraft();
     this.currentMode = rt.mode;
     this.currentModel = rt.model;
     this.currentThoughtLevel = thoughtOption(rt.configOptions)?.currentValue as string | undefined;
@@ -2482,6 +2499,8 @@ export class ChatController implements AcpHost {
     // so without this its header, terminate and move controls have no session.
     this.painted = true;
     this.post({ type: "sessionReady", sessionId: id, title: this.store.titles()[id] });
+    // The composer accepts this draft only after it knows the session id.
+    this.postDraft();
     // Replay anything the turn streamed while this session was in the background
     // (including a turn still running), so the restored transcript catches up
     // instead of showing the stale state from when the user left.
@@ -4870,7 +4889,9 @@ export class ChatController implements AcpHost {
       streamAnim: this.cfg().get<string>("incrementalRendering.animationStyle", "rise"),
       panelSide: this.cfg().get<string>("sessionsPanel.side", "right"),
       sendWhileWorking: this.cfg().get<string>("sendWhileWorking", "queue"),
-      surface: this.kind
+      surface: this.kind,
+      canMaximize: !!this.surfaces?.toggleMaximize,
+      maximized: this.surfaces?.isMaximized?.(this) === true
     });
   }
 

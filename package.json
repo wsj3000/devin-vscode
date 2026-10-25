@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code (Coder fork)",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.13.7",
+  "version": "0.13.8",
   "publisher": "wsj3000",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -51,6 +51,13 @@
           "title": "Devin",
           "icon": "resources/activity-icon.svg"
         }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "devinMaximized",
+          "title": "Devin",
+          "icon": "resources/activity-icon.svg"
+        }
       ]
     },
     "views": {
@@ -59,6 +66,14 @@
           "type": "webview",
           "id": "devin.chatView",
           "name": "Chat"
+        }
+      ],
+      "devinMaximized": [
+        {
+          "type": "webview",
+          "id": "devin.maximizedChatView",
+          "name": "Chat",
+          "when": "devin.chatMaximized"
         }
       ]
     },

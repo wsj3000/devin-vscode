@@ -31,6 +31,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     terminateBtn: $("terminate-btn"),
     shareBtn: $("share-btn"),
     detachBtn: $("detach-btn"),
+    maximizeBtn: $("maximize-btn"),
     status: $("status"),
     usage: $("usage"),
     sessionsList: $("sessions-list"),
@@ -740,6 +741,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   }
 
   function renderHeader() {
+    updateMaximizeBtn();
     const list = body === "list";
     // List-mode cluster, all on the right of the "Sessions" title. The list keeps
     // itself up to date, so there is nothing to refresh by hand.
@@ -1101,7 +1103,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     // Sharing publishes the conversation, so it only appears for a chat that exists
     // and only when the agent supports it.
     el.shareBtn.classList.toggle("hidden", !(show && caps.sessionShare));
-    el.detachBtn.classList.toggle("hidden", !show);
+    el.detachBtn.classList.toggle("hidden", !show || !!caps.maximized);
     updateHeaderDivider();
     if (!show) return;
     setBtnIcon(el.detachBtn, inEditor() ? "layout-sidebar-right-dock" : "link-external");
@@ -1114,6 +1116,19 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   });
   el.shareBtn.addEventListener("click", () => {
     if (curSessionId) vscode.postMessage({ type: "shareSession" });
+  });
+
+  function updateMaximizeBtn() {
+    el.maximizeBtn.classList.toggle("hidden", !caps.canMaximize);
+    const maximized = !!caps.maximized;
+    setBtnIcon(el.maximizeBtn, maximized ? "screen-normal" : "screen-full");
+    el.maximizeBtn.title = maximized ? "Restore chat" : "Maximize chat";
+    el.maximizeBtn.setAttribute("aria-label", el.maximizeBtn.title);
+    el.maximizeBtn.setAttribute("aria-pressed", String(maximized));
+  }
+  el.maximizeBtn.addEventListener("click", () => {
+    el.maximizeBtn.disabled = true;
+    vscode.postMessage({ type: "toggleMaximize", body });
   });
 
   // A chat runs in one place at a time, so when the one being opened is already
@@ -1421,6 +1436,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   function applyDraft(m) {
     const id = m.id || null;
     if (id !== draftKey() || editingQueuedId || editingTurn) return;
+    if (m.replace && el.input.value === savedDraft) el.input.value = "";
     // A surface fills its new chat box before it is handed a session, so the
     // composer can still hold text meant for another chat. Untouched, it goes.
     if (savedDraftKey !== id && el.input.value && el.input.value === savedDraft) {
@@ -7079,6 +7095,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // Apply UI preference gates (progress border, context usage) when the host
   // sends capabilities. Timestamps (verbose) are gated in buildTurnChrome.
   function applyCapPrefs() {
+    updateMaximizeBtn();
     el.inputBox.classList.toggle("busy", busy && caps.progressBorder);
     if (!caps.contextUsage) {
       el.usage.classList.add("hidden");
@@ -7718,8 +7735,16 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       // pending revert here to avoid a stale head trimming the wrong turn later.
       case "error": hideBoot(); pendingRevert = null; renderError(m.text); break;
       case "interrupted": hideBoot(); renderInterrupted(); break;
+      case "maximized":
+        caps.maximized = !!m.value;
+        el.maximizeBtn.disabled = !!m.pending;
+        updateMaximizeBtn();
+        updateDetachBtn();
+        break;
       case "capabilities":
         caps = Object.assign(caps, {
+          canMaximize: !!m.canMaximize,
+          maximized: !!m.maximized,
           root: m.root || caps.root,
           revert: !!m.revert,
           subagentControl: !!m.subagentControl,

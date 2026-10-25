@@ -48,10 +48,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
   manager = new ChatManager(context, store, changes, statusBar, output);
   const chat = manager;
+  void chat.restoreMaximizedLayout().catch((error) => output.appendLine(`[layout] ${String(error)}`));
   // Keep the session list live off the CLI's own store instead of a refresh button.
   chat.watchSessionStore();
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ChatManager.viewType, chat, {
+      webviewOptions: { retainContextWhenHidden: true }
+    }),
+    vscode.window.registerWebviewViewProvider(ChatManager.maximizedViewType, chat, {
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.window.registerWebviewPanelSerializer(ChatManager.editorViewType, chat),

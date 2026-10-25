@@ -15,9 +15,15 @@ import { checkHealth, loginShellEnv } from "../cli/locate";
 // `devin acp` sessions independently.
 export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPanelSerializer, SurfaceHost {
   public static readonly viewType = "devin.chatView";
+  public static readonly maximizedViewType = "devin.maximizedChatView";
   public static readonly editorViewType = "devin.chatEditor";
 
   private sidebar?: ChatController;
+  private maximized?: ChatController;
+  private maximizedFrom?: ChatController;
+  private maximizedReady = false;
+  private resizing = false;
+  private static readonly MAXIMIZED_STATE = "devin.chatMaximized";
   private readonly panels = new Map<ChatController, vscode.WebviewPanel>();
   // The chat tab the user is in, for the commands that act on a tab (rename).
   private activePanel?: ChatController;
@@ -39,6 +45,16 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   // --- Sidebar view ---------------------------------------------------------
 
   resolveWebviewView(view: vscode.WebviewView): void {
+    if (view.viewType === ChatManager.maximizedViewType) {
+      if (!this.maximized) {
+        this.maximized = new ChatController(this.context, this.store, this.changes, this.statusBar, this.output, "view", this);
+      }
+      const chat = this.maximized;
+      chat.bind(view.webview, () => void vscode.commands.executeCommand(`${ChatManager.maximizedViewType}.focus`));
+      chat.setSurfaceVisible(view.visible);
+      view.onDidChangeVisibility(() => chat.setSurfaceVisible(view.visible));
+      return;
+    }
     if (!this.sidebar) {
       this.sidebar = new ChatController(this.context, this.store, this.changes, this.statusBar, this.output, "view", this);
     }
@@ -48,6 +64,80 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
     // session list should not be re-listed while nobody can see it.
     sidebar.setSurfaceVisible(view.visible);
     view.onDidChangeVisibility(() => sidebar.setSurfaceVisible(view.visible));
+  }
+
+  isMaximized(controller: ChatController): boolean {
+    return !!this.maximizedFrom && controller === this.maximized;
+  }
+
+  async restoreMaximizedLayout(): Promise<void> {
+    if (!this.context.workspaceState.get<boolean>(ChatManager.MAXIMIZED_STATE, false)) {
+      return;
+    }
+    await vscode.commands.executeCommand("workbench.action.restoreAuxiliaryBar");
+    await vscode.commands.executeCommand("setContext", "devin.chatMaximized", false);
+    await this.context.workspaceState.update(ChatManager.MAXIMIZED_STATE, false);
+  }
+
+  async toggleMaximize(from: ChatController, body: "thread" | "list"): Promise<void> {
+    if (this.resizing) return;
+    this.resizing = true;
+    try {
+      if (this.maximizedFrom) {
+        await this.restoreChat(body);
+        return;
+      }
+      await from.flushSurfaceState();
+      this.maximizedFrom = from;
+      await this.context.workspaceState.update(ChatManager.MAXIMIZED_STATE, true);
+      await vscode.commands.executeCommand("setContext", "devin.chatMaximized", true);
+      // Maximize before revealing the temporary view so VS Code saves the
+      // original sidebars, panels and editor layout for its restore command.
+      await vscode.commands.executeCommand("workbench.action.maximizeAuxiliaryBar");
+      await vscode.commands.executeCommand(`${ChatManager.maximizedViewType}.focus`);
+      for (let attempt = 0; !this.maximized && attempt < 50; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+      if (!this.maximized) throw new Error("The maximized chat view did not open.");
+      await this.maximized.whenReady();
+      this.maximized.setMaximized(true, true);
+      const id = from.visibleSession();
+      if (id) await this.move(from, this.maximized, id);
+      else await from.moveEmptyComposer(this.maximized, body);
+      this.maximizedReady = true;
+      this.maximized.setMaximized(true);
+    } catch (error) {
+      if (this.maximizedFrom) await this.restoreChat(body);
+      throw error;
+    } finally {
+      this.resizing = false;
+      from.setMaximized(this.isMaximized(from));
+      if (this.maximized) this.maximized.setMaximized(this.isMaximized(this.maximized));
+    }
+  }
+
+  private async restoreChat(body: "thread" | "list"): Promise<void> {
+    let to = this.maximizedFrom;
+    if (!to) return;
+    if (to !== this.sidebar && !this.panels.has(to)) {
+      to = await this.ensureSidebar();
+    }
+    if (!to) throw new Error("The original chat view did not open.");
+    const from = this.maximized;
+    if (from && this.maximizedReady) {
+      const visible = from.visibleSession();
+      // Return any sessions opened while maximized, with the visible one last.
+      const ids = from.liveSessions().filter((id) => id !== visible);
+      if (visible) ids.push(visible);
+      for (const id of ids) await this.move(from, to, id);
+      if (!visible) await from.moveEmptyComposer(to, body);
+      from.setMaximized(false);
+    }
+    await this.restoreMaximizedLayout();
+    this.maximizedFrom = undefined;
+    this.maximizedReady = false;
+    to.setMaximized(false);
+    to.focus();
   }
 
   // --- Moving a session between surfaces (SurfaceHost) ----------------------
@@ -65,6 +155,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   }
 
   label(controller: ChatController): string {
+    if (controller === this.maximized) return "the maximized chat";
     return controller === this.sidebar ? "the side panel" : "an editor tab";
   }
 
@@ -272,7 +363,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
   }
 
   private controllers(): ChatController[] {
-    return [this.sidebar, ...this.panels.keys(), ...this.deciding].filter(Boolean) as ChatController[];
+    return [this.sidebar, this.maximized, ...this.panels.keys(), ...this.deciding].filter(Boolean) as ChatController[];
   }
 
   private closePanelFor(controller: ChatController): void {
@@ -521,6 +612,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
       return;
     }
     this.stopped = true;
+    await this.restoreMaximizedLayout().catch((error) => this.output.appendLine(`[layout] ${String(error)}`));
     this.stopWatching();
     // `deciding` included: a tab closed with a live chat still holds its agent
     // while the user answers the dialog, and that agent has to stop with the rest.
@@ -534,6 +626,7 @@ export class ChatManager implements vscode.WebviewViewProvider, vscode.WebviewPa
       return;
     }
     this.stopped = true;
+    void this.restoreMaximizedLayout().catch((error) => this.output.appendLine(`[layout] ${String(error)}`));
     this.stopWatching();
     for (const controller of this.controllers()) {
       controller.dispose();

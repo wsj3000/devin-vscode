@@ -3904,6 +3904,55 @@ test("answers given before leaving a session come back with the question", async
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a composer handover replaces a retained draft while preserving new typing", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "draft", id: null, text: "old draft" });
+  const input = h.document.getElementById("input");
+  assert.strictEqual(input.value, "old draft");
+  h.post({ type: "draft", id: null, text: "new draft", replace: true });
+  assert.strictEqual(input.value, "new draft");
+  input.value = "new typing";
+  h.post({ type: "draft", id: null, text: "late draft", replace: true });
+  assert.strictEqual(input.value, "new typing");
+  h.dom.window.close();
+});
+
+test("chat maximization offers restore in both the thread and session list", async () => {
+  const h = createHarness();
+  try {
+    h.post({ type: "ready" });
+    h.post({ type: "capabilities", canMaximize: true, surface: "view" });
+    const button = h.document.getElementById("maximize-btn");
+    assert.ok(!button.classList.contains("hidden"));
+    assert.strictEqual(button.title, "Maximize chat");
+    button.click();
+    assert.ok(h.posted.some((m) => m.type === "toggleMaximize" && m.body === "list"));
+    assert.strictEqual(button.disabled, true);
+
+    h.post({ type: "body", body: "thread" });
+    h.post({ type: "sessionReady", sessionId: "A" });
+    h.post({ type: "maximized", value: true });
+    assert.strictEqual(button.disabled, false);
+    assert.strictEqual(button.title, "Restore chat");
+    assert.strictEqual(button.getAttribute("aria-pressed"), "true");
+    assert.ok(h.document.getElementById("detach-btn").classList.contains("hidden"));
+    h.document.getElementById("input").value = "unfinished message";
+    button.click();
+    assert.strictEqual(h.posted.at(-1).type, "toggleMaximize");
+    assert.strictEqual(h.posted.at(-1).body, "thread");
+    assert.strictEqual(h.document.getElementById("input").value, "unfinished message");
+
+    h.post({ type: "body", body: "list" });
+    assert.ok(!button.classList.contains("hidden"), "the list must still have a way to restore");
+    h.post({ type: "maximized", value: false });
+    assert.strictEqual(button.title, "Maximize chat");
+    assert.strictEqual(button.getAttribute("aria-pressed"), "false");
+  } finally {
+    h.dom.window.close();
+  }
+});
+
 test("the header offers detach in the panel and attach in an editor tab", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

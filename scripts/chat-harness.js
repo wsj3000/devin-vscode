@@ -282,6 +282,12 @@ function createChat(opts = {}) {
   const toHost = webviewDouble.last;
 
   const api = {
+    createManager() {
+      const manager = new (load().ChatManager)(context, store, changes, undefined, output);
+      manager.sidebar = controller;
+      controller.surfaces = manager;
+      return manager;
+    },
     controller,
     store,
     changes,

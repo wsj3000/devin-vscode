@@ -143,6 +143,106 @@ test("context usage stays on the lead while Fusion sidekicks and subagents run",
   }
 });
 
+test("maximizing and restoring a busy chat keeps its agent, stream and draft", posixOnly, async () => {
+  const source = createChat({ promptDelay: 60000, config: { defaultMode: "", defaultModel: "" } });
+  const manager = source.createManager();
+  let target;
+  const commands = globalThis.__dvVscode.commands;
+  const execute = commands.executeCommand;
+  const calls = [];
+  commands.executeCommand = async (...args) => { calls.push(args); };
+  try {
+    await source.ready();
+    const id = await source.startChat("keep working while maximized");
+    target = createChat({ storage: source.storage, surfaceHost: manager });
+    target.controller.store = source.store;
+    manager.maximized = target.controller;
+    await target.ready();
+    const rt = source.controller.runtimes.get(id);
+    source.store.setDraft(id, "unfinished message");
+
+    await manager.toggleMaximize(source.controller, "thread");
+    assert.strictEqual(target.controller.runtimes.get(id), rt);
+    assert.strictEqual(source.controller.runtimes.has(id), false);
+    assert.strictEqual(rt.busy, true);
+    assert.strictEqual(target.last("draft").text, "unfinished message");
+    assert.ok(target.posted.findLastIndex((m) => m.type === "draft") > target.posted.findLastIndex((m) => m.type === "sessionReady"));
+    assert.strictEqual(manager.isMaximized(target.controller), true);
+    rt.client.emit("update", { sessionId: id, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "during maximize" } } });
+    assert.strictEqual(target.last("assistantChunk").text, "during maximize");
+
+    await manager.toggleMaximize(target.controller, "thread");
+    assert.strictEqual(source.controller.runtimes.get(id), rt);
+    assert.strictEqual(target.controller.runtimes.has(id), false);
+    assert.strictEqual(source.controller.visibleSession(), id);
+    assert.strictEqual(source.last("draft").text, "unfinished message");
+    assert.strictEqual(rt.busy, true);
+    assert.strictEqual(source.agentSaw("session/new").length, 1);
+    assert.strictEqual(source.agentSaw("session/load").length, 0);
+    rt.client.emit("update", { sessionId: id, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "after restore" } } });
+    assert.strictEqual(source.last("assistantChunk").text, "after restore");
+    assert.strictEqual(target.last("assistantChunk").text, "during maximize");
+    assert.ok(calls.some(([id]) => id === "workbench.action.maximizeAuxiliaryBar"));
+    assert.ok(calls.some(([id]) => id === "workbench.action.restoreAuxiliaryBar"));
+    assert.strictEqual(source.state.get("devin.chatMaximized"), false);
+  } finally {
+    commands.executeCommand = execute;
+    await target?.dispose();
+    await source.dispose();
+  }
+});
+
+test("maximizing a new composer preserves its draft and attachments", posixOnly, async () => {
+  const source = createChat({ config: { defaultMode: "", defaultModel: "" } });
+  const manager = source.createManager();
+  const target = createChat({ storage: source.storage, surfaceHost: manager });
+  target.controller.store = source.store;
+  manager.maximized = target.controller;
+  try {
+    await source.ready();
+    await target.ready();
+    source.store.setDraft(undefined, "new chat draft");
+    source.send({ type: "attachDroppedText", name: "context.txt", text: "staged context" });
+    assert.ok(await source.until(() => source.last("attachments")?.items?.length === 1));
+    await manager.toggleMaximize(source.controller, "list");
+    assert.strictEqual(target.last("draft").text, "new chat draft");
+    assert.strictEqual(target.last("attachments").items[0].label, "context.txt");
+    await manager.toggleMaximize(target.controller, "thread");
+    assert.strictEqual(source.last("draft").text, "new chat draft");
+    assert.strictEqual(source.last("attachments").items[0].label, "context.txt");
+    assert.strictEqual(source.agentSaw("session/new").length, 0);
+  } finally {
+    await target.dispose();
+    await source.dispose();
+  }
+});
+
+test("a failed maximize restores the layout without losing the original agent", posixOnly, async () => {
+  const h = createChat({ promptDelay: 60000, config: { defaultMode: "", defaultModel: "" } });
+  const manager = h.createManager();
+  const commands = globalThis.__dvVscode.commands;
+  const execute = commands.executeCommand;
+  const calls = [];
+  commands.executeCommand = async (id) => {
+    calls.push(id);
+    if (id === "devin.maximizedChatView.focus") throw new Error("view unavailable");
+  };
+  try {
+    await h.ready();
+    const id = await h.startChat("keep the agent if maximize fails");
+    const rt = h.controller.runtimes.get(id);
+    await assert.rejects(manager.toggleMaximize(h.controller, "thread"), /view unavailable/);
+    assert.strictEqual(h.controller.runtimes.get(id), rt);
+    assert.strictEqual(rt.busy, true);
+    assert.strictEqual(h.state.get("devin.chatMaximized"), false);
+    assert.ok(calls.includes("workbench.action.restoreAuxiliaryBar"));
+    assert.strictEqual(h.agentSaw("session/new").length, 1);
+  } finally {
+    commands.executeCommand = execute;
+    await h.dispose();
+  }
+});
+
 test("idle sessions do not hand diagnostics to the agent", posixOnly, async () => {
   const h = createChat({ promptDelay: 500, config: { "editorContext.diagnostics": true } });
   await h.ready();

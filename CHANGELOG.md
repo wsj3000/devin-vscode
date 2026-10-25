@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.8] - 2026-10-25
+
+### Highlights
+- Maximize a chat across the workspace and restore its original position.
+- Keep running sessions and drafts when maximizing or restoring a chat.
+
 ## [0.13.7] - 2026-10-19
 
 ### Highlights

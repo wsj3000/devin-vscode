@@ -6,5 +6,6 @@
 // for: without a project of its own it is checked by nothing, and an editor is left to
 // guess a configuration for it and for everything it imports.
 export { ChatController } from "../src/chat/chatViewProvider";
+export { ChatManager } from "../src/chat/chatManager";
 export { SessionStore } from "../src/session/sessionStore";
 export { ChangeTracker } from "../src/diff/changeTracker";
