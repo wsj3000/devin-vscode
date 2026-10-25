@@ -3639,8 +3639,8 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // the user, and the choice is kept for the next plan raised this session (like
   // VS Code's per-widget userManuallyExpanded). Reset only on a session change.
   let planCollapsePref = null;
-  // Same idea for the working-set (file changes) widget: remember a manual
-  // collapse so it survives the widget hiding and reappearing within a session.
+  // The file changes widget starts collapsed and remembers a manual toggle
+  // when it hides and reappears within a session.
   let wsCollapsePref = null;
 
   function planRow(entry) {
@@ -5970,7 +5970,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     if (!ctrl) {
       el.workingSet.innerHTML = "";
       ctrl = makeCollapsible("ws-collapsible", {
-        startCollapsed: false,
+        startCollapsed: true,
         onUserToggle: () => { wsCollapsePref = el.workingSet._ctrl.isCollapsed(); }
       });
       ctrl.header.classList.add("ws-header");
@@ -6041,8 +6041,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       row.appendChild(grp);
       list.appendChild(row);
     });
-    // Honour a remembered manual collapse (the widget is otherwise always shown
-    // expanded), so it survives the working set hiding and reappearing.
+    // Only a manual toggle can override the collapsed default.
     if (wsCollapsePref !== null) ctrl.setCollapsed(wsCollapsePref);
     updateComposerDock();
   }
