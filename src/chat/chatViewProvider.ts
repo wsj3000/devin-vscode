@@ -2304,8 +2304,22 @@ export class ChatController implements AcpHost {
     if (inflight) {
       // A load/wake for this session is already running; make it the active one
       // and share its result rather than spawning a second acp.
+      const returning = this.activeId !== id;
       this.activeId = id;
-      return inflight;
+      await inflight;
+      if (returning && this.activeId === id) {
+        const rt = this.runtimes.get(id);
+        if (rt) {
+          // Earlier replay batches belonged to the page we left. Rebuild them
+          // once loading finishes instead of displaying only the remaining tail.
+          if (!rt.logFull) await this.loadSession(id);
+          else {
+            this.replayLog(rt);
+            await this.activateSession(id);
+          }
+        }
+      }
+      return;
     }
     const p = this.doLoadSession(id);
     this.loading.set(id, p);

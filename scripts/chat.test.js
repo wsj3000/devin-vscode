@@ -1514,6 +1514,95 @@ test("a watched list update follows an in-flight session refresh", posixOnly, as
   await h.dispose();
 });
 
+for (const count of [120, 4050]) {
+  test(`returning during a history load rebuilds ${count} earlier messages`, posixOnly, async () => {
+    const h = createChat({ config: { defaultMode: "", defaultModel: "" } });
+    let release;
+    try {
+      await h.ready();
+      const held = new Promise((resolve) => { release = resolve; });
+      let entered = false;
+      let loads = 0;
+      h.controller.loadWithTakeover = async (rt) => {
+        if (rt.id === "history-a") {
+          loads++;
+          for (let i = 0; i < count; i++) {
+            h.controller.onUpdate({ sessionId: rt.id, update: {
+              sessionUpdate: "user_message_chunk", messageId: `m${i}`, content: { type: "text", text: `history-${i}` }
+            } }, rt);
+          }
+          entered = true;
+          await held;
+          h.controller.onUpdate({ sessionId: rt.id, update: {
+            sessionUpdate: "agent_message_chunk", messageId: "last", content: { type: "text", text: "history-tail" }
+          } }, rt);
+        }
+        return {};
+      };
+      h.store.add("history-a", h.cwd);
+      h.store.add("history-b", h.cwd);
+      h.send({ type: "loadSession", id: "history-a" });
+      assert.ok(await h.until(() => entered));
+      h.send({ type: "loadSession", id: "history-b" });
+      assert.ok(await h.until(() => h.activeId() === "history-b" && !h.controller.loading.has("history-b")));
+      const beforeReturn = h.posted.length;
+      const returning = h.controller.loadSession("history-a");
+      assert.ok(await h.until(() => h.activeId() === "history-a"));
+      release();
+      await returning;
+      const messages = h.posted.slice(beforeReturn);
+      const rebuilt = messages.slice(messages.findLastIndex((message) => message.type === "clear") + 1)
+        .flatMap((message) => message.type === "replay" ? message.items : [message])
+        .filter((message) => message.text?.startsWith("history-"));
+      assert.deepStrictEqual(rebuilt.map((message) => message.text), [
+        ...Array.from({ length: count }, (_, i) => `history-${i}`), "history-tail"
+      ], "the final transcript includes every message once");
+      assert.strictEqual(loads, count > 4000 ? 2 : 1, "a full reload is needed only when the retained log was truncated");
+    } finally {
+      release?.();
+      await h.dispose();
+    }
+  });
+}
+
+test("a returning load does not repaint after the reader switches away again", posixOnly, async () => {
+  const h = createChat({ config: { defaultMode: "", defaultModel: "" } });
+  let release;
+  try {
+    await h.ready();
+    const held = new Promise((resolve) => { release = resolve; });
+    let entered = false;
+    h.controller.loadWithTakeover = async (rt) => {
+      if (rt.id === "history-a") {
+        entered = true;
+        await held;
+        h.controller.onUpdate({ sessionId: rt.id, update: {
+          sessionUpdate: "agent_message_chunk", content: { type: "text", text: "history from a" }
+        } }, rt);
+      }
+      return {};
+    };
+    h.store.add("history-a", h.cwd);
+    h.store.add("history-b", h.cwd);
+    const initial = h.controller.loadSession("history-a");
+    assert.ok(await h.until(() => entered));
+    await h.controller.loadSession("history-b");
+    const returning = h.controller.loadSession("history-a");
+    assert.ok(await h.until(() => h.activeId() === "history-a"));
+    await h.controller.loadSession("history-b");
+    const beforeRelease = h.posted.length;
+    release();
+    await Promise.all([initial, returning]);
+    assert.strictEqual(h.activeId(), "history-b");
+    const messages = h.posted.slice(beforeRelease);
+    assert.ok(!messages.some((message) => message.type === "clear" || message.type === "replay"));
+    assert.ok(!messages.some((message) => message.type === "sessionReady" && message.sessionId === "history-a"));
+  } finally {
+    release?.();
+    await h.dispose();
+  }
+});
+
 test("a model pick waits for a stored session to finish loading", posixOnly, async () => {
   const h = createChat({ config: { defaultMode: "", defaultModel: "", defaultThoughtLevel: "" } });
   let release;

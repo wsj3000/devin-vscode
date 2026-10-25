@@ -8,6 +8,11 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.10] - 2026-10-25
+
+### Highlights
+- Restore complete history when returning before a session finishes loading.
+
 ## [0.13.9] - 2026-10-25
 
 ### Under the hood
