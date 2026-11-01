@@ -27,7 +27,13 @@ import { listModelFamilies } from "../cli/models";
 
 // This extension's id, used to filter VS Code's Settings editor when linking out
 // to the settings that control the extension rather than the Devin CLI.
-const EXTENSION_ID = "shayanline.devin-vscode";
+const EXTENSION_ID = "wsj3000.devin-vscode";
+
+const SESSION_DEFAULTS: Record<string, boolean | number> = {
+  stopSessionsOnWindowClose: true,
+  idleSessionKeepAliveMinutes: 1440,
+  maxIdleSessions: 10
+};
 
 // Every value row the settings surface renders, with the default Devin applies
 // when the key is absent from the config. This one table drives the controls,
@@ -64,7 +70,7 @@ const ROW_KEYS = Object.keys(ROW_DEFAULTS);
 const MUTATING = new Set([
   "settings:setPath", "settings:resetSection", "settings:addHook", "settings:permission",
   "settings:createFile", "settings:deletePath", "settings:removeHook", "settings:createSkill",
-  "settings:mcpAdd", "settings:mcpVerb", "settings:pluginVerb", "settings:clearExtensionModel"
+  "settings:mcpAdd", "settings:mcpVerb", "settings:pluginVerb", "settings:clearExtensionModel", "settings:setSessionSetting"
 ]);
 
 // Of those, the writes that can change which rules and hooks are in force, which
@@ -81,7 +87,7 @@ const RELOADS_AGENT = new Set([
 // section sidebar (General, Instructions, Skills, Plugins, MCP, Hooks,
 // Permissions, Advanced) and a scope picker (Global, plus each workspace folder),
 // exposing the full Devin CLI config surface. Settings that control this
-// extension live in VS Code settings and are only linked to from here.
+// extension live in VS Code settings. Session lifecycle controls can also be edited here.
 export class SettingsPanel {
   private static current?: SettingsPanel;
   private readonly panel: vscode.WebviewPanel;
@@ -338,6 +344,9 @@ export class SettingsPanel {
         case "settings:setPath":
           await this.setValue(scopeOf(msg.scope), String(msg.path), msg.value, msg.root ? String(msg.root) : this.root());
           return;
+        case "settings:setSessionSetting":
+          await this.setSessionSetting(String(msg.key), msg.value, scopeOf(msg.scope), msg.root ? String(msg.root) : undefined);
+          return;
         case "settings:setRoot":
           // Follows the scope tab, so project-scoped CLI verbs run in that folder. The
           // directory itself is brought up to date by the refresh below.
@@ -465,6 +474,34 @@ export class SettingsPanel {
   private async openExtensionSettings(query: string): Promise<void> {
     const filter = `@ext:${EXTENSION_ID}` + (query ? ` ${query}` : "");
     await vscode.commands.executeCommand("workbench.action.openSettings", filter);
+  }
+
+  private sessionSettings(): unknown[] {
+    return this.scopeGroups().map((group) => {
+      const cfg = vscode.workspace.getConfiguration("devin", group.root ? vscode.Uri.file(group.root) : undefined);
+      const values: Record<string, unknown> = {};
+      const setKeys: string[] = [];
+      for (const [key, fallback] of Object.entries(SESSION_DEFAULTS)) {
+        const info = cfg.inspect<boolean | number>(key);
+        values[key] = info?.globalValue ?? info?.defaultValue ?? fallback;
+        const own = group.scope === "user" ? info?.globalValue : info?.workspaceValue;
+        if (own !== undefined) setKeys.push(key);
+        if (group.scope !== "user") values[key] = own ?? values[key];
+      }
+      return { ...group, values, setKeys };
+    });
+  }
+
+  private async setSessionSetting(key: string, value: unknown, scope: ConfigScope, root?: string): Promise<void> {
+    if (!Object.prototype.hasOwnProperty.call(SESSION_DEFAULTS, key)) throw new Error("Unknown session setting.");
+    if (value !== undefined && (typeof value !== typeof SESSION_DEFAULTS[key] ||
+      (typeof value === "number" && (!Number.isFinite(value) || value < 0)))) {
+      throw new Error("Session limits must be nonnegative numbers and the window close setting must be a boolean.");
+    }
+    if (scope !== "user" && !this.folders().some((folder) => folder.path === root)) throw new Error("Select an open workspace folder.");
+    const cfg = vscode.workspace.getConfiguration("devin", scope !== "user" ? vscode.Uri.file(root!) : undefined);
+    await cfg.update(key, value, scope === "user" ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace);
+    await this.sendData();
   }
 
   // Clear the extension's model override so chats started here fall back to the
@@ -781,9 +818,10 @@ export class SettingsPanel {
       valuesByScope: groups.map((g) => this.valueGroup(g)),
       // Per folder: keys whose effective value genuinely overrides the User value.
       folderOverrides: Object.fromEntries(this.folders().map((f) => [f.path, this.overriddenKeys(f.path)])),
-      // Settings owned by this extension, disclosed here but edited in VS Code.
+      // Extension values are read from VS Code settings, separate from CLI config.
       extension: {
-        defaultModel: vscode.workspace.getConfiguration("devin").get<string>("defaultModel", "") || ""
+        defaultModel: vscode.workspace.getConfiguration("devin").get<string>("defaultModel", "") || "",
+        sessionsByScope: this.sessionSettings()
       },
       instructions: {
         byScope: groups.map((g) => ({ ...g, file: this.ruleFileForDir(g.scope === "user" ? userConfigDir() : g.root!) })),

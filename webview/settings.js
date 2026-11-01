@@ -6,8 +6,8 @@
 //   1. Scope (Global / a workspace folder) is picked once in the toolbar, not
 //      repeated down the page. One page shows one scope. Rows carry "set here"
 //      and "overridden" markers so choosing one scope hides no information.
-//   2. This surface only ever edits Devin CLI config. Settings that control the
-//      extension itself live in VS Code settings, and are linked to from here.
+//   2. Session lifecycle controls write VS Code settings. Other extension
+//      settings are linked to from here, while CLI controls write CLI config.
 //
 // All untrusted values are written via textContent, never innerHTML.
 (function () {
@@ -65,7 +65,7 @@
     "settings:setPath", "settings:resetSection", "settings:permission", "settings:addHook",
     "settings:removeHook", "settings:createSkill", "settings:createFile", "settings:deletePath",
     "settings:mcpAdd", "settings:mcpVerb", "settings:mcpLogin", "settings:pluginVerb",
-    "settings:clearExtensionModel"
+    "settings:clearExtensionModel", "settings:setSessionSetting"
   ]);
   // Counts work handed to the host, so a control can tell whether the click it
   // just handled actually started something.
@@ -654,7 +654,7 @@
       const groupHit = keepAll || (title ? title.textContent.toLowerCase().indexOf(q) >= 0 : false);
       let inGroup = 0;
       for (const row of g.querySelectorAll(ROW_SEL)) {
-        const hay = (row.textContent + " " + (row.getAttribute("data-key") || "")).toLowerCase();
+        const hay = (row.textContent + " " + (row.getAttribute("data-key") || row.getAttribute("data-extension-key") || "")).toLowerCase();
         const hit = groupHit || hay.indexOf(q) >= 0;
         row.classList.toggle("settings-hidden", !hit);
         if (hit) inGroup++;
@@ -681,6 +681,7 @@
         group("Session", [
           keyToggle("agent.show_history_on_continue", "Show history on resume", "Show previous messages when resuming a session.")
         ], { reset: true }),
+        sessionLifecycle(),
         group("Behaviour", [
           keyToggle("attribution", "Attribution on commits and PRs", "Add the Generated with Devin line and the Co-Authored-By trailer."),
           keyToggle("auto_update", "Auto update the Devin CLI"),
@@ -915,12 +916,44 @@
   };
 
   // --- The extension's own settings ----------------------------------------
-  // Anything that controls this extension rather than the Devin CLI belongs in
-  // VS Code settings, so this surface only links to it. The one exception is a
-  // conflict: when the VS Code setting `devin.defaultModel` is set, it silently
+  // Session lifecycle controls write VS Code settings directly. A separate
+  // conflict notice explains when `devin.defaultModel` silently
   // overrides the CLI model above for chats started here, which is invisible
-  // otherwise. That is reported as a warning on the affected row, not as a
-  // setting of its own, and only while the conflict exists.
+  // otherwise. Other extension settings are linked below.
+  function sessionLifecycle() {
+    const groups = (data.extension && data.extension.sessionsByScope) || [];
+    const g = scoped(groups) || { scope: "user", values: {}, setKeys: [] };
+    const row = (key, label, fallback, hint) => {
+      const value = g.values[key] ?? fallback;
+      const write = (next) => post("settings:setSessionSetting", { key, value: next, scope: g.scope, root: g.root });
+      let control;
+      if (typeof fallback === "boolean") {
+        control = toggle(value, write);
+        control.querySelector("input").setAttribute("aria-label", label);
+      } else {
+        control = textInput(String(value), "", (next) => {
+          if (next !== "" && Number.isFinite(Number(next)) && Number(next) >= 0) write(Number(next));
+        });
+        control.type = "number";
+        control.min = "0";
+        control.step = "any";
+        control.setAttribute("aria-label", label);
+      }
+      const controls = [control];
+      if ((g.setKeys || []).includes(key)) controls.push(iconBtn("discard", "Reset " + label, () => write(undefined)));
+      const overrides = scope === "user" ? groups.filter((other) => other.scope !== "user" && other.values[key] !== value).map((other) => other.title) : [];
+      const r = fieldRow(label, controls, hint, overrides.length ? h("div", { class: "settings-field-override", text: "Overridden in " + overrides.join(", ") }) : null);
+      r.setAttribute("data-extension-key", "devin." + key);
+      return r;
+    };
+    return group("Idle sessions and window close", [
+      empty("Saved to VS Code Global or Workspace settings. Workspace values apply to all folders."),
+      row("stopSessionsOnWindowClose", "Stop sessions on window close", true, "On by default. Turn off before starting or reopening a session to keep it running after closing or refreshing the editor. Pending permissions wait for reconnection. Workspace stops and restarts still interrupt tasks."),
+      row("idleSessionKeepAliveMinutes", "Idle session keep alive (minutes)", 1440, "Keep idle sessions for 24 hours by default. Set 0 for no time limit. Running tasks are never reclaimed. Detached sessions are reclaimed only after reconnection."),
+      row("maxIdleSessions", "Maximum idle sessions", 10, "Keep up to 10 idle sessions by default. Set 0 for no limit. Applies while sessions are attached to the editor.")
+    ]);
+  }
+
   function extensionModelNotice() {
     const override = ((data && data.extension) || {}).defaultModel || "";
     if (!override) return null;

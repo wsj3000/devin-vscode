@@ -123,7 +123,9 @@ Long running commands can continue in the background while Devin works on the ne
 
 ## Keep a session running after closing the window
 
-By default, closing or reloading the VS Code window stops its Devin sessions and commands. On Linux and macOS, disable `devin.stopSessionsOnWindowClose` before starting or reopening a session to run it in an independent background process:
+By default, closing or reloading the VS Code window stops its Devin sessions and commands. On Linux and macOS, disable `devin.stopSessionsOnWindowClose` before starting or reopening a session to run it in an independent background process.
+
+Open **Devin: Open Settings**, then **General > Idle sessions and window close** to change the window close toggle, idle keep alive time and maximum idle sessions together. The scope picker chooses Global or Workspace settings. Workspace values apply to all folders. These controls save to VS Code settings and reflect changes made in its Settings editor too. You can also edit the value directly:
 
 ```json
 {

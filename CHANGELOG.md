@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.13] - 2026-11-01
+
+### Highlights
+- Edit window close and idle session settings together in General.
+- Open VS Code settings for the Coder fork from the Devin settings page.
+
 ## [0.13.12] - 2026-11-01
 
 ### Highlights

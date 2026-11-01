@@ -217,7 +217,7 @@ test("search matches rows across every section", () => {
   assert.deepStrictEqual(h.consoleErrors, []);
 });
 
-test("only CLI settings get a row; an extension setting that overrides one is a notice", () => {
+test("the extension model override remains a notice on the CLI model row", () => {
   const h = createSettings();
   // No row of its own: the extension's model setting belongs to VS Code.
   assert.ok(!h.rowKeys().includes("devin.defaultModel"));
@@ -231,6 +231,48 @@ test("only CLI settings get a row; an extension setting that overrides one is a 
   assert.deepStrictEqual(h.last(), { type: "settings:openExtensionSettings", query: "defaultModel" });
   h.click("Clear it");
   assert.strictEqual(h.last().type, "settings:clearExtensionModel");
+});
+
+test("window close and idle controls share a group and write typed VS Code settings in the chosen scope", () => {
+  const h = createSettings();
+  const row = (key) => h.document.querySelector('[data-extension-key="devin.' + key + '"]');
+  const close = row("stopSessionsOnWindowClose");
+  const minutes = row("idleSessionKeepAliveMinutes");
+  assert.strictEqual(close.closest(".settings-group"), minutes.closest(".settings-group"));
+  assert.strictEqual(close.closest(".settings-group"), row("maxIdleSessions").closest(".settings-group"));
+  assert.strictEqual(minutes.querySelector("input").value, "1440");
+  close.querySelector("input").click();
+  assert.deepStrictEqual(h.last(), { type: "settings:setSessionSetting", key: "stopSessionsOnWindowClose", value: false, scope: "user" });
+  assert.strictEqual(h.last("settings:setPath"), undefined, "extension settings must not write CLI config");
+  h.send({ type: "settings:idle" });
+  h.openScope("Workspace");
+  const input = row("idleSessionKeepAliveMinutes").querySelector("input");
+  input.value = "0";
+  input.dispatchEvent(new h.window.Event("blur"));
+  assert.deepStrictEqual(h.last("settings:setSessionSetting"), { type: "settings:setSessionSetting", key: "idleSessionKeepAliveMinutes", value: 0, scope: "project", root: h.data.folders[0].path });
+  h.send({ type: "settings:idle" });
+  const before = h.posted.length;
+  input.value = "-1";
+  input.dispatchEvent(new h.window.Event("blur"));
+  assert.strictEqual(h.posted.length, before, "negative limits are not sent");
+  h.search("stopSessionsOnWindowClose");
+  assert.ok(h.visibleRows().some((r) => r.getAttribute("data-extension-key") === "devin.stopSessionsOnWindowClose"));
+});
+
+test("session controls show saved overrides and can reset the workspace value", () => {
+  const h = createSettings();
+  const data = JSON.parse(JSON.stringify(h.data));
+  const workspace = data.extension.sessionsByScope[1];
+  workspace.values.stopSessionsOnWindowClose = false;
+  workspace.values.maxIdleSessions = 0;
+  workspace.setKeys = ["stopSessionsOnWindowClose", "maxIdleSessions"];
+  h.send({ type: "settings:data", data });
+  const row = () => h.document.querySelector('[data-extension-key="devin.stopSessionsOnWindowClose"]');
+  assert.match(row().textContent, /Overridden in Workspace/);
+  h.openScope("Workspace");
+  assert.strictEqual(row().querySelector("input").checked, false);
+  h.click("Reset Stop sessions on window close");
+  assert.deepStrictEqual(h.last(), { type: "settings:setSessionSetting", key: "stopSessionsOnWindowClose", scope: "project", root: h.data.folders[0].path });
 });
 
 test("the override notice is absent when there is no conflict to report", () => {

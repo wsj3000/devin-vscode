@@ -56,6 +56,7 @@ function panelDouble() {
 
 function makePanel(root) {
   globalThis.__dvFolders = [{ name: path.basename(root), uri: vscode.Uri.file(root), index: 0 }];
+  vscode.workspace.workspaceFolders = globalThis.__dvFolders;
   const context = { extensionUri: vscode.Uri.file(ROOT), subscriptions: [] };
   const panel = new SettingsPanel(context, panelDouble());
   panel.sendData = async () => {};
@@ -125,6 +126,61 @@ test("disposing the current settings panel clears its watcher state", () => {
   assert.strictEqual(panelDisposed, true);
   assert.strictEqual(panel.disposed, true);
   assert.strictEqual(SettingsPanel.current, undefined);
+});
+
+test("session settings preserve user and workspace precedence and save only VS Code values", async () => {
+  const root = fs.mkdtempSync(path.join(TMP, "sessions-"));
+  const panel = makePanel(root);
+  const original = vscode.workspace.getConfiguration;
+  const writes = [];
+  vscode.workspace.getConfiguration = (section, uri) => ({
+    inspect: (key) => key === "stopSessionsOnWindowClose"
+      ? { defaultValue: true, globalValue: true, workspaceValue: false }
+      : key === "idleSessionKeepAliveMinutes"
+        ? { defaultValue: 1440, globalValue: 60, workspaceValue: 0 }
+        : { defaultValue: 10, globalValue: 0 },
+    update: async (key, value, target) => writes.push({ section, root: uri?.fsPath, key, value, target })
+  });
+  try {
+    const [user, workspace] = panel.sessionSettings();
+    assert.strictEqual(user.values.stopSessionsOnWindowClose, true);
+    assert.strictEqual(workspace.values.stopSessionsOnWindowClose, false);
+    assert.strictEqual(user.values.idleSessionKeepAliveMinutes, 60);
+    assert.strictEqual(workspace.values.idleSessionKeepAliveMinutes, 0);
+    assert.strictEqual(workspace.values.maxIdleSessions, 0, "an inherited zero must remain zero");
+    await panel.setSessionSetting("stopSessionsOnWindowClose", false, "user");
+    await panel.setSessionSetting("idleSessionKeepAliveMinutes", 0, "project", root);
+    await panel.setSessionSetting("stopSessionsOnWindowClose", undefined, "project", root);
+    assert.deepStrictEqual(writes, [
+      { section: "devin", root: undefined, key: "stopSessionsOnWindowClose", value: false, target: vscode.ConfigurationTarget.Global },
+      { section: "devin", root, key: "idleSessionKeepAliveMinutes", value: 0, target: vscode.ConfigurationTarget.Workspace },
+      { section: "devin", root, key: "stopSessionsOnWindowClose", value: undefined, target: vscode.ConfigurationTarget.Workspace }
+    ]);
+    assert.strictEqual(fs.existsSync(path.join(root, ".devin")), false, "session controls never write CLI config files");
+    await assert.rejects(panel.setSessionSetting("cliPath", "changed", "user"), /Unknown session setting/);
+    await assert.rejects(panel.setSessionSetting("maxIdleSessions", -1, "user"), /nonnegative/);
+    await assert.rejects(panel.setSessionSetting("stopSessionsOnWindowClose", "false", "user"), /boolean/);
+    await assert.rejects(panel.setSessionSetting("maxIdleSessions", 10, "project", path.join(root, "outside")), /open workspace/);
+    assert.strictEqual(writes.length, 3, "invalid writes leave all settings alone");
+  } finally {
+    vscode.workspace.getConfiguration = original;
+    panel.dispose();
+  }
+});
+
+test("settings links target the installed Coder fork", async () => {
+  const root = fs.mkdtempSync(path.join(TMP, "settings-link-"));
+  const panel = makePanel(root);
+  const original = vscode.commands.executeCommand;
+  let command;
+  vscode.commands.executeCommand = async (...args) => { command = args; };
+  try {
+    await panel.openExtensionSettings("stopSessionsOnWindowClose");
+    assert.deepStrictEqual(command, ["workbench.action.openSettings", "@ext:wsj3000.devin-vscode stopSessionsOnWindowClose"]);
+  } finally {
+    vscode.commands.executeCommand = original;
+    panel.dispose();
+  }
 });
 
 test.after(() => {

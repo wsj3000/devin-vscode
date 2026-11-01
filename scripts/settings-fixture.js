@@ -91,7 +91,10 @@ function buildData(opts) {
     },
     valuesByScope: [userGroup].concat(folderGroups),
     folderOverrides: Object.fromEntries(folders.map((f, i) => [f.path, i === 0 && !o.empty ? Object.keys(FOLDER_SET) : []])),
-    extension: { defaultModel: o.empty ? "" : "claude-sonnet-4-5" },
+    extension: {
+      defaultModel: o.empty ? "" : "claude-sonnet-4-5",
+      sessionsByScope: byScope(() => ({ values: { stopSessionsOnWindowClose: true, idleSessionKeepAliveMinutes: 1440, maxIdleSessions: 10 }, setKeys: [] }))
+    },
     instructions: {
       byScope: byScope((scope, f) => ({
         file: {
