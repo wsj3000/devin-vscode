@@ -121,6 +121,22 @@ By default, commands run through the Devin CLI while their output streams into t
 
 Long running commands can continue in the background while Devin works on the next step. Subagent work appears in a separate block, where supported by the CLI, and a running subagent can move between the foreground and background.
 
+## Keep a session running after closing the window
+
+By default, closing or reloading the VS Code window stops its Devin sessions and commands. On Linux and macOS, disable `devin.stopSessionsOnWindowClose` before starting or reopening a session to run it in an independent background process:
+
+```json
+{
+  "devin.stopSessionsOnWindowClose": false
+}
+```
+
+Existing direct sessions cannot be detached by changing the setting during a turn. Finish their work first, then reopen the conversation with the setting disabled. After a browser refresh or window reopen, select the original conversation from the session list to reconnect. `devin.autoResumeLast` can select it automatically. Loading a retained session reattaches to its original process without restarting its active turn or resending your prompt.
+
+Background commands run outside the integrated VS Code terminal, so they can finish while the editor is closed. Their output and file changes are available after reconnection. Permissions and questions wait for you to return and are never automatically approved. The Stop action still cancels the current turn, and explicitly terminating a session still stops its process and commands. Reenable the window close setting before closing the window if you want its attached background sessions stopped too.
+
+Conversation updates remain in memory with a 64 MiB limit per background process. Only private process and session metadata is written to `~/.cache/devin-vscode/agents`. This does not create AI memory backups. Stopping the workspace, rebooting, or terminating the background process still interrupts its work. Idle session cleanup is applied while a session is attached to an editor. Detached sessions remain alive until reattached or explicitly terminated. Windows currently keeps the default stop behaviour and reports an error if background mode is requested.
+
 ## Change settings
 
 Run **Devin: Open Settings** from the Command Palette to manage the Devin CLI configuration in a built in editor. It supports instructions, skills, plugins, MCP servers, hooks, permissions, and other CLI options at machine or workspace scope. Changes are written to the CLI configuration that the `devin` command uses in your terminal.

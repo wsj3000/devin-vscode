@@ -8,6 +8,12 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.12] - 2026-11-01
+
+### Highlights
+- Keep idle sessions alive for 24 hours by default, with up to 10 retained.
+- Optionally keep sessions running when closing or reloading the window.
+
 ## [0.13.11] - 2026-10-25
 
 ### Highlights

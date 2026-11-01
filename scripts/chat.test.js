@@ -2036,4 +2036,76 @@ test("catalogue uids are translated to the values the session's model option acc
   }
 });
 
+test("window shutdown detaches an opted in background session and reload reattaches it", posixOnly, async () => {
+  const h = createChat({ promptDelay: 700, config: { stopSessionsOnWindowClose: false } });
+  const id = await h.startChat("keep going across window reload");
+  const original = h.controller.runtimes.get(id);
+  let next;
+  try {
+    await h.controller.shutdown();
+    assert.strictEqual(original.client.hasExited(), true, "only the frontend proxy exited");
+    assert.ok(!h.store.interrupted().includes(id), "a retained turn is not reported as interrupted");
+    next = createChat({ cwd: h.cwd, storage: h.storage, state: Object.fromEntries(h.state.__map), config: { stopSessionsOnWindowClose: false } });
+    await next.ready();
+    await next.controller.loadSession(id);
+    assert.strictEqual(next.liveChats(), 1);
+    assert.ok(await next.until(() => !next.controller.runtimes.get(id)?.busy, 5000), "the retained turn finishes in the reopened surface");
+    assert.strictEqual(h.agentSaw("session/prompt").length, 1, "reattachment does not resend the prompt");
+    assert.strictEqual(h.agentSaw("session/load").length, 0, "a live agent is not destructively reloaded");
+  } finally {
+    await next?.controller.runtimes.get(id)?.client.shutdown();
+    await h.dispose();
+    await next?.dispose();
+  }
+});
+
+test("a failed background reattachment leaves the original turn running", posixOnly, async () => {
+  const h = createChat({ promptDelay: 1500, config: { stopSessionsOnWindowClose: false, autoResumeLast: false } });
+  const id = await h.startChat("survive a failed restore");
+  let failed, next, opened;
+  try {
+    await h.controller.shutdown();
+    const options = { cwd: h.cwd, storage: h.storage, state: Object.fromEntries(h.state.__map), config: { stopSessionsOnWindowClose: false, autoResumeLast: false } };
+    failed = createChat(options);
+    let attempted = false;
+    const load = failed.controller.loadWithTakeover.bind(failed.controller);
+    failed.controller.loadWithTakeover = async (...args) => {
+      attempted = true;
+      await load(...args);
+      throw new Error("restore failed after attaching");
+    };
+    await failed.ready();
+    await failed.controller.loadSession(id);
+    assert.ok(attempted, "restoration actually attempted");
+    assert.strictEqual(failed.controller.runtimes.has(id), false, "the failed frontend is discarded");
+    next = createChat(options);
+    await next.ready();
+    await next.controller.loadSession(id);
+    opened = next.controller.runtimes.get(id);
+    assert.ok(opened, "another frontend can still attach");
+    assert.strictEqual(h.agentSaw("session/new").length, 1, "no replacement agent was needed");
+    assert.strictEqual(h.agentSaw("session/load").length, 0, "the original live agent survived the failed restore");
+    assert.ok(await next.until(() => !opened.busy, 5000), "the original turn completes");
+    assert.strictEqual(opened.client.hasExited(), false, "the original agent remains connected after completion");
+    const status = await opened.client.rpc("_devin.persist/status", {}, 1000);
+    assert.strictEqual(status.agentPid, h.agentSaw("session/prompt")[0]._agent, "the original agent process is retained");
+    assert.strictEqual(h.agentSaw("session/cancel").length, 0, "a failed frontend must not cancel the retained turn");
+  } finally {
+    await opened?.client.shutdown();
+    await h.dispose();
+    await failed?.dispose();
+    await next?.dispose();
+  }
+});
+
+test("the default window policy still stops direct sessions", posixOnly, async () => {
+  const h = createChat({ promptDelay: 700 });
+  const id = await h.startChat("stop when the window closes");
+  const client = h.controller.runtimes.get(id).client;
+  await h.controller.shutdown();
+  assert.strictEqual(client.isPersistent, false);
+  assert.strictEqual(client.hasExited(), true);
+  await h.dispose();
+});
+
 test.after(() => cleanup());

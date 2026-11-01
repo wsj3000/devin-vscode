@@ -57,6 +57,18 @@ async function main() {
   });
 
   const contexts = [extensionCtx, webviewCtx, mermaidCtx, settingsCtx];
+  const persistentCtx = await esbuild.context({
+    entryPoints: ["src/acp/persistentAgent.ts"],
+    bundle: true,
+    format: "cjs",
+    minify: production,
+    sourcemap: !production,
+    platform: "node",
+    target: "node18",
+    outfile: "dist/persistentAgent.js",
+    logLevel: "info"
+  });
+  contexts.push(persistentCtx);
   if (watch) {
     await Promise.all(contexts.map((c) => c.watch()));
   } else {

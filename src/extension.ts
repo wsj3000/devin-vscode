@@ -9,9 +9,8 @@ import { SettingsPanel } from "./settings/settingsPanel";
 import { shutdownQueryAgents } from "./acp/queryClient";
 
 // Held at module scope so `deactivate` can await the shutdown. A `devin acp`
-// agent runs its commands, file writes and permission prompts through this
-// extension host over our stdio, so it cannot be handed to the next one: the
-// only safe move on the way out is to stop every agent deterministically.
+// agent normally runs through this extension host and is stopped on exit.
+// Opted in background sessions instead detach from their independent broker.
 let manager: ChatManager | undefined;
 // Held here for the same reason: its last write is debounced, and `deactivate` is
 // the only place left that can wait for it.

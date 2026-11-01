@@ -2,7 +2,7 @@
   "name": "devin-vscode",
   "displayName": "Devin for VS Code (Coder fork)",
   "description": "A native chat panel for the Devin CLI, powered by the Agent Client Protocol. Streaming replies, per workspace sessions, and trackable diffs.",
-  "version": "0.13.11",
+  "version": "0.13.12",
   "publisher": "wsj3000",
   "author": "Shayan Khaksar",
   "license": "AGPL-3.0-or-later",
@@ -418,15 +418,20 @@
           "default": false,
           "description": "When the chat opens, resume the last session used in this workspace."
         },
+        "devin.stopSessionsOnWindowClose": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Stop Devin sessions when the VS Code window closes or reloads. Disable to run newly opened sessions and their commands in a detached background process on Linux/macOS. Reopen the original conversation to reconnect. Change this before starting or reopening a session. Existing direct sessions cannot be detached. Pending permissions wait for you to reconnect. Workspace stops and machine restarts still stop background sessions."
+        },
         "devin.idleSessionKeepAliveMinutes": {
           "type": "number",
-          "default": 60,
+          "default": 1440,
           "minimum": 0,
           "description": "How long to keep an idle live session (waiting for you) alive before it is automatically exited. Running sessions are never auto-exited. Set to 0 to keep idle sessions alive indefinitely."
         },
         "devin.maxIdleSessions": {
           "type": "number",
-          "default": 3,
+          "default": 10,
           "minimum": 0,
           "description": "Maximum number of idle live sessions to keep. Running sessions are never auto-exited. Set to 0 to keep an unlimited number."
         },

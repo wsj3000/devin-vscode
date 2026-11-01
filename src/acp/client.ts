@@ -2,6 +2,7 @@ import { spawn, execFile, ChildProcessWithoutNullStreams } from "child_process";
 import { EventEmitter } from "events";
 import { cliCommand } from "../cli/locate";
 import { JsonRpcConnection } from "./connection";
+import { persistenceLocation } from "./persistentPaths";
 import {
   AcpSessionRow,
   AgentStopped,
@@ -36,6 +37,7 @@ export interface AcpClientOptions {
   env?: NodeJS.ProcessEnv;
   extraArgs?: string[];
   diagnostics?: boolean;
+  persistent?: { script: string; sessionId?: string; root?: string };
 }
 
 // Callbacks the host (extension) provides so the client can serve the
@@ -72,6 +74,7 @@ const OPEN_TIMEOUT_MS = 180_000;
 // the window. Long enough not to fire on a busy machine, since the cost of firing
 // early is only a fallback.
 const QUERY_TIMEOUT_MS = 30_000;
+const STOP_TIMEOUT_MS = 800;
 
 export class AcpClient extends EventEmitter {
   private child?: ChildProcessWithoutNullStreams;
@@ -89,11 +92,17 @@ export class AcpClient extends EventEmitter {
     this.host = host;
   }
 
+  get isPersistent(): boolean { return !!this.options.persistent; }
+
   start(): void {
-    const cmd = cliCommand(this.options.cliPath, ["acp", ...(this.options.extraArgs || [])]);
+    const persistent = this.options.persistent;
+    const location = persistent ? persistenceLocation(this.options.cwd, this.options.cliPath, persistent.sessionId, persistent.root) : undefined;
+    const cmd = persistent && location
+      ? { file: process.execPath, args: [persistent.script, "proxy", location.root, location.key, this.options.cliPath, ...(this.options.extraArgs || [])], shell: false }
+      : cliCommand(this.options.cliPath, ["acp", ...(this.options.extraArgs || [])]);
     const child = spawn(cmd.file, cmd.args, {
       cwd: this.options.cwd,
-      env: this.options.env ? { ...this.options.env } : { ...process.env },
+      env: { ...(this.options.env || process.env), ...(persistent ? { ELECTRON_RUN_AS_NODE: "1" } : {}) },
       stdio: ["pipe", "pipe", "pipe"],
       shell: cmd.shell,
       windowsHide: true,
@@ -172,6 +181,10 @@ export class AcpClient extends EventEmitter {
   }
 
   private handleNotification(method: string, params: unknown): void {
+    if (method.startsWith("_devin.persist/")) {
+      this.emit(method.slice("_devin.persist/".length), params);
+      return;
+    }
     if (method === "session/update") {
       this.emit("update", params as SessionUpdateNotification);
       return;
@@ -314,6 +327,10 @@ export class AcpClient extends EventEmitter {
 
   cancel(sessionId: string): void {
     this.conn?.notify("session/cancel", { sessionId });
+  }
+
+  skipPersistentTerminal(terminalId: string): Promise<{ skipped: boolean }> {
+    return this.rpc("_devin.persist/skipTerminal", { terminalId }, QUERY_TIMEOUT_MS);
   }
 
   renameSession(sessionId: string, title: string): Promise<unknown> {
@@ -462,6 +479,10 @@ export class AcpClient extends EventEmitter {
   // timer, which is only reliable because we are still here to fire it. Use
   // `shutdown()` on the way out instead.
   dispose(): void {
+    if (this.isPersistent) {
+      void this.shutdown();
+      return;
+    }
     this.conn?.dispose();
     // SIGTERM the whole group (lets the agent + docker-based MCP shut down
     // cleanly), then SIGKILL any stragglers shortly after.
@@ -476,10 +497,13 @@ export class AcpClient extends EventEmitter {
   // Escalates within `timeoutMs`: closing stdin is a clean EOF most stdio agents
   // exit on, then SIGTERM the process group so docker-backed MCP servers get to
   // tidy up, then SIGKILL. Any turn should be cancelled by the caller first.
-  async shutdown(timeoutMs = 800): Promise<void> {
+  async shutdown(timeoutMs = STOP_TIMEOUT_MS): Promise<void> {
     if (!this.child || this.exited) {
       this.conn?.dispose();
       return;
+    }
+    if (this.isPersistent) {
+      try { await this.rpc("_devin.persist/stop", {}, Math.max(1, Math.min(timeoutMs, STOP_TIMEOUT_MS))); } catch { /* the broker may already have exited */ }
     }
     const deadline = Date.now() + timeoutMs;
     this.conn?.dispose();
@@ -493,6 +517,16 @@ export class AcpClient extends EventEmitter {
     this.emit("log", "[acp-shutdown] agent ignored SIGTERM, killing");
     this.killTree("SIGKILL");
     await this.waitForExit(150);
+  }
+
+  async detach(): Promise<void> {
+    if (!this.isPersistent) return this.shutdown();
+    this.conn?.dispose();
+    if (!await this.waitForExit(1000)) {
+      // Only the disposable proxy belongs to this process group.
+      this.killTree("SIGTERM");
+      if (!await this.waitForExit(200)) this.killTree("SIGKILL");
+    }
   }
 
   // Whether the agent process has already gone. A surface being handed a session

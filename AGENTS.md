@@ -17,11 +17,11 @@ It is a personal, open source project published on the VS Code Marketplace under
 ## How it fits together
 
 - **`src/`** is the extension host (TypeScript, runs in Node inside VS Code).
-  - `extension.ts` activates the extension, wires up commands, and shuts every
-    agent down cleanly on the way out.
+  - `extension.ts` activates the extension, wires up commands, and shuts direct agents down cleanly on the way out. Sessions started with `devin.stopSessionsOnWindowClose=false` detach from their background brokers instead.
   - `acp/` speaks the Agent Client Protocol to a `devin acp` process: the
     connection, the client, terminal handling, diagnostics, the throwaway agent the
     settings panel asks questions of, and the shared types.
+    `persistentAgent.ts` is a separate Node entry point built as `dist/persistentAgent.js`. It owns opted in background agents, terminals and file operations. Frontends reconnect through private Unix sockets. Default sessions still use direct agents.
   - `chat/` holds the `ChatManager` (one controller per chat surface: sidebar,
     editor tab, or window), the webview provider that renders each chat, and the
     transcript log each chat is replayed from.

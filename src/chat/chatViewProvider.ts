@@ -4,6 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
+import { readAgentFile, writeAgentFile, AgentFileEdit } from "../acp/agentFiles";
 import {
   AgentStopped,
   AvailableCommand,
@@ -65,6 +66,8 @@ interface Runtime {
   // webview (used during a silent wake so the cached transcript is not disturbed).
   silentReplay?: boolean;
   lastActivityAt: number; // for idle auto-exit
+  remoteTerminals?: Map<string, { terminalId: string; output: string; exitStatus: TerminalExitStatus | null; skipped?: boolean; revealed?: boolean }>;
+  persistentEnded?: boolean;
   mode?: string;
   model?: string;
   configOptions?: ConfigOption[];
@@ -767,9 +770,7 @@ export class ChatController implements AcpHost {
     to.postStaged();
   }
 
-  // Kill every live ACP process (and its terminals) so a window reload or
-  // extension deactivate does not leave stranded `devin acp` agents (and their
-  // MCP servers). This is item 6: stop all sessions on exit.
+  // Stop direct agents and detach opted in background agents on disposal.
   //
   // Synchronous, so the escalation to SIGKILL is left on a timer. Prefer
   // `shutdown()` when the extension host itself is going away, since that timer
@@ -777,45 +778,40 @@ export class ChatController implements AcpHost {
   dispose(): void {
     this.closed = true;
     this.releaseReadyWaiters(new Error("Chat surface is closed"));
-    this.stopLocalState();
     // A surface that has gone cannot be the one holding the keyboard.
     this.setFocused(false);
-    for (const rt of new Set([...this.runtimes.values(), ...this.spawnedRuntimes])) {
+    const live = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
+    this.runtimes.clear();
+    for (const rt of live) {
       // The same as terminating the chat, which this is one of the ways of doing:
       // closing a tab mid turn offers to terminate, and the prompt promises the
       // conversation is kept, not that the writing behind it is thrown away.
       this.keepQueued(rt);
-      this.destroyRuntime(rt);
+      if (this.keepOnWindowClose(rt)) void rt.client.detach();
+      else this.destroyRuntime(rt);
     }
-    this.runtimes.clear();
+    this.stopLocalState();
     this.spawnedRuntimes.clear();
     this.starting.clear();
     this.activeId = undefined;
   }
 
-  // Stop everything for good on the way out (window reload, extension
-  // deactivate), and resolve only once every agent is really gone.
-  //
-  // A `devin acp` agent cannot be handed over to the next extension host: it
-  // runs its shell commands, file writes and permission prompts through us, over
-  // our stdio, so leaving it alive would strand an agent that can do nothing
-  // while still holding the CLI's session lock. Instead each one is stopped
-  // deterministically here, and any session with a turn in flight is recorded so
-  // the next window can say the turn was interrupted rather than losing it
-  // silently.
+  // Stop direct agents on exit, or detach sessions owned by a background broker.
+  // Only stopped turns are reported as interrupted on the next window.
   async shutdown(): Promise<void> {
     this.closed = true;
     this.releaseReadyWaiters(new Error("Chat surface is closed"));
     // Everything with a process, not just everything with a session id: a chat
-    // still waiting on session/new is not in the pool yet, and it is exactly as
-    // unable to outlive us as the rest.
+    // still waiting on session/new is not in the pool yet.
     const live = [...new Set([...this.runtimes.values(), ...this.spawnedRuntimes])];
-    const interrupted = live.filter((rt) => rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
+    const retained = new Set(live.filter((rt) => this.keepOnWindowClose(rt)));
+    const interrupted = live.filter((rt) => !retained.has(rt) && rt.id && (rt.busy || rt.awaiting > 0)).map((rt) => rt.id);
     // Anything still waiting behind a turn is the user's own writing, and it only
     // ever lived on the runtime we are about to stop.
     const unsent = live.flatMap((rt) => rt.queued.map((q) => ({ id: rt.id, text: q.text })));
-    this.stopLocalState();
     this.runtimes.clear();
+    await Promise.all([...retained].map((rt) => rt.client.detach()));
+    this.stopLocalState();
     this.spawnedRuntimes.clear();
     this.starting.clear();
     this.activeId = undefined;
@@ -825,12 +821,16 @@ export class ChatController implements AcpHost {
       this.store.markInterrupted(interrupted),
       this.store.queuedBackToDrafts(unsent)
     ]);
-    await Promise.all(live.map((rt) => this.stopRuntime(rt)));
+    await Promise.all(live.filter((rt) => !retained.has(rt)).map((rt) => this.stopRuntime(rt)));
     try {
       await recorded;
     } catch {
       // workspaceState is best effort; losing the note is not worth failing on
     }
+  }
+
+  private keepOnWindowClose(rt: Runtime): boolean {
+    return rt.client.isPersistent && !this.cfg().get<boolean>("stopSessionsOnWindowClose", true);
   }
 
   // Stop one runtime in order: cancel the turn so the agent can stop cleanly,
@@ -1026,6 +1026,7 @@ export class ChatController implements AcpHost {
     rt.client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     rt.client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
     rt.client.on("exit", () => this.onRuntimeExit(rt));
+    this.listenPersistent(rt);
     rt.terminals.retarget(
       (terminalId, output, exitStatus) => {
         if (this.activeId === rt.id) {
@@ -1104,14 +1105,15 @@ export class ChatController implements AcpHost {
     return this.activeId ? this.runtimes.get(this.activeId) : undefined;
   }
 
-  private destroyRuntime(rt: Runtime): void {
+  private destroyRuntime(rt: Runtime, action: "stop" | "detach" = "stop"): void {
     this.spawnedRuntimes.delete(rt);
     try {
       // Stop listening before stopping the process: everything this runtime could
       // still say is about a session we have finished with, and its exit is about
       // to arrive late enough to be mistaken for a live one's.
       rt.client.removeAllListeners();
-      rt.client.dispose();
+      if (action === "detach" && rt.client.isPersistent) void rt.client.detach();
+      else rt.client.dispose();
     } catch {
       // ignore
     }
@@ -1130,7 +1132,7 @@ export class ChatController implements AcpHost {
 
   // Spawn a fresh `devin acp` process and wire its events. The runtime is not
   // yet in the pool: its session id is unknown until session/new or /load.
-  private spawnRuntime(cwd: string): Runtime {
+  private spawnRuntime(cwd: string, sessionId?: string): Runtime {
     if (this.closed) {
       throw new Error("Chat surface is closed");
     }
@@ -1139,7 +1141,10 @@ export class ChatController implements AcpHost {
       cwd,
       env: this.clientEnv(),
       extraArgs: this.extraArgs(),
-      diagnostics: this.cfg().get<boolean>("editorContext.diagnostics", true)
+      diagnostics: this.cfg().get<boolean>("editorContext.diagnostics", true),
+      persistent: this.cfg().get<boolean>("stopSessionsOnWindowClose", true) ? undefined : {
+        script: path.join(this.context.extensionUri.fsPath, "dist", "persistentAgent.js"), sessionId
+      }
     });
     let ref: Runtime | undefined;
     const terminals = new TerminalManager(
@@ -1188,8 +1193,38 @@ export class ChatController implements AcpHost {
     client.on("stopped", (s: AgentStopped) => this.onAgentStopped(rt, s));
     client.on("revertSteps", (s: RevertStepsUpdate) => this.onRevertSteps(rt, s));
     client.on("exit", () => this.onRuntimeExit(rt));
+    this.listenPersistent(rt);
     client.start();
     return rt;
+  }
+
+  private listenPersistent(rt: Runtime): void {
+    if (!rt.client.isPersistent) return;
+    rt.remoteTerminals ||= new Map();
+    rt.client.on("terminalCreated", (params: { terminalId: string; command: string }) => {
+      rt.pendingTerminals.push({ id: params.terminalId, command: params.command });
+      if (rt.pendingTerminals.length > 8) rt.pendingTerminals.shift();
+    });
+    rt.client.on("terminalOutput", (params: { terminalId: string; output: string; exitStatus: TerminalExitStatus | null }) => {
+      const previous = rt.remoteTerminals!.get(params.terminalId);
+      const terminal = { ...previous, ...params };
+      rt.remoteTerminals!.set(params.terminalId, terminal);
+      if (this.activeId === rt.id) this.post({ type: "terminalOutput", ...terminal, integrated: false });
+    });
+    rt.client.on("fileChanged", (edit: AgentFileEdit & { sessionId?: string }) => this.recordFileWrite(edit, edit.sessionId || rt.id));
+    rt.client.on("turnEnded", (result: PromptResult & { error?: string }) => {
+      if (rt.replaying) {
+        rt.persistentEnded = true;
+        rt.busy = false;
+        return;
+      }
+      if (rt.turn || rt.replaying || !rt.busy) return;
+      if (this.activeId === rt.id) {
+        this.post({ type: "assistantEnd", stopReason: result.stopReason });
+        if (result.error) this.post({ type: "error", text: result.error });
+      }
+      this.endTurn(rt);
+    });
   }
 
   // The CLI's own output stream. Its MCP channel is the only place a server that
@@ -1410,10 +1445,10 @@ export class ChatController implements AcpHost {
   }
 
   private reapIdleRuntimes(): void {
-    const minutes = this.cfg().get<number>("idleSessionKeepAliveMinutes", 60);
-    const limit = Math.floor(this.cfg().get<number>("maxIdleSessions", 3));
+    const minutes = this.cfg().get<number>("idleSessionKeepAliveMinutes", 1440);
+    const limit = Math.floor(this.cfg().get<number>("maxIdleSessions", 10));
     const now = Date.now();
-    const idle = [...this.runtimes.values()].filter((rt) => !rt.replaying && !rt.waking && !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning());
+    const idle = [...this.runtimes.values()].filter((rt) => !rt.replaying && !rt.waking && !rt.busy && rt.awaiting === 0 && !rt.terminals.hasRunning() && ![...(rt.remoteTerminals?.values() || [])].some((t) => !t.exitStatus));
     const reaped = new Set<Runtime>();
     if (minutes > 0) {
       const maxIdleMs = minutes * 60000;
@@ -1641,6 +1676,12 @@ export class ChatController implements AcpHost {
           const rt = this.active();
           const id = String(msg.terminalId || "");
           if (rt) {
+            const remote = rt.remoteTerminals?.get(id);
+            if (remote) {
+              remote.revealed = true;
+              this.post({ type: "terminalOutput", ...remote, integrated: false });
+              return;
+            }
             rt.terminals.show(id);
             this.postTerminal(rt.terminals, id, rt.terminals.output(id).output, rt.terminals.output(id).exitStatus);
           }
@@ -1651,6 +1692,15 @@ export class ChatController implements AcpHost {
           // says so as soon as the host confirms.
           const rt = this.active();
           const id = String(msg.terminalId || "");
+          if (rt?.client.isPersistent) {
+            const result = await rt.client.skipPersistentTerminal(id);
+            const remote = rt.remoteTerminals?.get(id);
+            if (result.skipped && remote) {
+              remote.skipped = true;
+              this.post({ type: "terminalOutput", ...remote, integrated: false });
+            }
+            return;
+          }
           if (rt && rt.terminals.skip(id)) {
             this.postTerminal(rt.terminals, id, rt.terminals.output(id).output, null);
           }
@@ -2372,7 +2422,7 @@ export class ChatController implements AcpHost {
     this.broadcastStatuses();
 
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
-    const rt = already ?? this.spawnRuntime(cwd);
+    const rt = already ?? this.spawnRuntime(cwd, id);
     if (!already) {
       rt.id = id;
       this.runtimes.set(id, rt);
@@ -2384,8 +2434,10 @@ export class ChatController implements AcpHost {
         await this.ensureInitialized(rt);
       }
       this.postCapabilities();
+      rt.persistentEnded = false;
       const res = await this.loadWithTakeover(rt, id, cwd);
       await staged;
+      if (rt.client.isPersistent) this.setRuntimeBusy(rt, res?._meta?.["devin.persist/busy"] === true && !rt.persistentEnded);
       rt.lastActivityAt = Date.now();
       this.rememberSession(id, cwd);
       // Loading a chat means spawning an agent and replaying its history, which
@@ -2411,7 +2463,7 @@ export class ChatController implements AcpHost {
       // Waking failed: drop the half-spawned runtime so the row goes gray again,
       // and stop pointing `activeId` at a runtime that no longer exists.
       if (!already) {
-        this.destroyRuntime(rt);
+        this.destroyRuntime(rt, "detach");
         this.runtimes.delete(id);
         if (this.activeId === id) {
           this.activeId = undefined;
@@ -2609,7 +2661,7 @@ export class ChatController implements AcpHost {
     this.postDraft();
     const staged = this.loadStaged(id);
     const cwd = this.store.cwds()[id] || this.resolveNewSessionCwd();
-    const rt = this.spawnRuntime(cwd);
+    const rt = this.spawnRuntime(cwd, id);
     rt.id = id;
     this.runtimes.set(id, rt);
     rt.replaying = true;
@@ -2621,8 +2673,10 @@ export class ChatController implements AcpHost {
     rt.waking = new Promise<void>((resolve) => { done = resolve; });
     try {
       await this.ensureInitialized(rt);
+      rt.persistentEnded = false;
       const res = await this.loadWithTakeover(rt, id, cwd);
       await staged;
+      if (rt.client.isPersistent) this.setRuntimeBusy(rt, res?._meta?.["devin.persist/busy"] === true && !rt.persistentEnded);
       rt.lastActivityAt = Date.now();
       this.rememberSession(id, cwd);
       // A wake takes seconds too, so this only speaks for the panel while the panel
@@ -2647,7 +2701,7 @@ export class ChatController implements AcpHost {
       this.ensureIdleTimer();
     } catch (err) {
       if (this.runtimes.get(id) === rt) {
-        this.destroyRuntime(rt);
+        this.destroyRuntime(rt, "detach");
         this.runtimes.delete(id);
         if (this.activeId === id) {
           this.activeId = undefined;
@@ -4481,6 +4535,7 @@ export class ChatController implements AcpHost {
     this.post({ type: "clear", loading: true });
     this.postReplay(paintedReplay(rt.log));
     this.post({ type: "loaded" });
+    for (const terminal of rt.remoteTerminals?.values() || []) this.post({ type: "terminalOutput", ...terminal, integrated: false });
     // The log is a superset of anything buffered while the session was hidden.
     rt.bgBuffer = [];
   }
@@ -5375,15 +5430,7 @@ export class ChatController implements AcpHost {
   }
 
   async readTextFile(params: ReadTextFileParams): Promise<{ content: string }> {
-    const full = this.resolvePath(params.path, params.sessionId);
-    let content = await fs.promises.readFile(full, "utf8");
-    if (params.line || params.limit) {
-      const lines = content.split("\n");
-      const start = Math.max(0, (params.line ?? 1) - 1);
-      const end = params.limit ? start + params.limit : lines.length;
-      content = lines.slice(start, end).join("\n");
-    }
-    return { content };
+    return readAgentFile({ ...params, path: this.resolvePath(params.path, params.sessionId) }, this.cwd());
   }
 
   // Each runtime owns its own TerminalManager, so terminal client requests are
@@ -5457,45 +5504,15 @@ export class ChatController implements AcpHost {
   }
 
   async writeTextFile(params: WriteTextFileParams): Promise<Record<string, never>> {
-    const full = this.resolvePath(params.path, params.sessionId);
-    let bytes: Buffer | undefined;
-    try {
-      bytes = await fs.promises.readFile(full);
-    } catch (err) {
-      // Only "it is not there" may become a null original: that is the sentinel for
-      // a file this chat created, and it is what makes Undo DELETE rather than
-      // restore. Folding a permission error, a lock, or running out of file handles
-      // into it meant an edit to an existing file was recorded as a creation, and
-      // undoing it deleted the user's file with nothing kept to put back.
-      const code = (err as { code?: string }).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") {
-        throw err;
-      }
-      bytes = undefined;
-    }
-    const original = bytes ? bytes.toString("utf8") : null;
-    // Reading a UTF-16 or Latin-1 file as text gives replacement characters, and
-    // writing that back would destroy every byte they stood for. Refuse instead:
-    // the agent is told why, which is better than a file it silently ruined.
-    if (bytes && original !== null && !bytes.equals(Buffer.from(original, "utf8"))) {
-      throw new Error(`${path.basename(full)} is not UTF-8 text, so it was left alone.`);
-    }
-    await fs.promises.mkdir(path.dirname(full), { recursive: true });
-    // Keep the file's own line endings: the agent writes LF, and rewriting a
-    // CRLF file with it would show every line as changed in git.
-    let content = original && /\r\n/.test(original) && !/\r\n/.test(params.content)
-      ? params.content.replace(/\n/g, "\r\n")
-      : params.content;
-    // And keep its byte order mark for the same reason: the agent's content will
-    // not have one, and dropping it is a real change to a .csproj, a .ps1 or
-    // anything else Windows authored, on a line the diff does not even show.
-    if (original && original.startsWith("\uFEFF") && !content.startsWith("\uFEFF")) {
-      content = "\uFEFF" + content;
-    }
-    await fs.promises.writeFile(full, content, "utf8");
+    const edit = await writeAgentFile({ ...params, path: this.resolvePath(params.path, params.sessionId) }, this.cwd());
+    this.recordFileWrite(edit, params.sessionId);
+    return {};
+  }
+
+  private recordFileWrite({ full, original, content }: AgentFileEdit, sessionId?: string): void {
     // The edit is tracked against the session that made it, so a background
     // session's working set is waiting for it when it is next opened.
-    const rt = this.runtimeBySessionId(params.sessionId);
+    const rt = this.runtimeBySessionId(sessionId);
     if (rt) {
       const s = diffStat(original, content);
       const editId = this.editId(rt, full);
@@ -5503,9 +5520,6 @@ export class ChatController implements AcpHost {
       this.emit(rt, { type: "fileChange", path: full, added: s.added, removed: s.removed, created: original == null, editId });
       this.changes.recordDiff(full, original, content, rt.id, s);
     }
-    // The agent's fs/write_text_file expects an (empty) object result; returning
-    // null makes it report a spurious "Parse error" even though the write landed.
-    return {};
   }
 
   // --- HTML ---------------------------------------------------------------
