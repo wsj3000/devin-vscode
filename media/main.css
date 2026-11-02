@@ -4824,9 +4824,15 @@ body.dv-resizing #sessions-resizer {
 
 .session-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   font-size: 0.82em;
+}
+
+.session-background {
+  white-space: nowrap;
+  opacity: 0.7;
 }
 
 .session-time {

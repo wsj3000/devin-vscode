@@ -8,6 +8,27 @@ the commit messages carry the detail.
 > locally. The builds between 0.6.65 and 0.6.91 reached the Marketplace together
 > in 0.6.92.
 
+## [0.13.16] - 2026-11-02
+
+### Highlights
+- Show live background sessions with accurate running and idle colors.
+- Mark detached sessions as Background and allow confirmed termination.
+
+## [0.13.15] - 2026-11-02
+
+### Highlights
+- Keep up to 256 MiB of compressed replay history per background session.
+
+## [0.13.14] - 2026-11-02
+
+### Highlights
+- Reconnect long background conversations without hitting the raw size limit.
+- Show history loading progress and clear the spinner when loading fails.
+
+### Under the hood
+- Compress replay history in memory and pace it to the receiving connection.
+- Upgrade idle legacy brokers without restarting running turns.
+
 ## [0.13.13] - 2026-11-01
 
 ### Highlights

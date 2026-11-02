@@ -1307,6 +1307,43 @@ test("session load hides the replay behind the spinner until it settles", async 
   assert.strictEqual(h.errors().length, 0);
 });
 
+test("a session load shows progress and reveals an error without waiting for loaded", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "body", body: "thread" });
+  h.post({ type: "clear", loading: true });
+  h.post({ type: "loadingProgress", elapsedMs: 135000, updates: 82 });
+  assert.match(h.thread().querySelector(".thread-loading").textContent, /135s, 82 updates/);
+  h.post({ type: "error", text: "The background transcript reached its memory limit" });
+  assert.ok(!h.thread().classList.contains("loading-replay"));
+  assert.strictEqual(h.thread().querySelector(".thread-loading"), null);
+  assert.match(h.thread().querySelector(".error-card").textContent, /memory limit/);
+  assert.strictEqual(h.errors().length, 0);
+});
+
+test("detached processes keep state colors and clear their background badge on reattachment", async () => {
+  const h = createHarness();
+  h.post({ type: "ready" });
+  h.post({ type: "sessions", sessions: [
+    { id: "work", title: "Working", working_directory: "/w" },
+    { id: "wait", title: "Waiting", working_directory: "/w" }
+  ], statuses: { work: "running", wait: "idle" }, background: ["work", "wait"] });
+  await h.settle(5);
+  const rows = () => [...h.document.querySelectorAll("#sessions-list .session-item")];
+  assert.ok(rows()[0].querySelector(".dot-running"));
+  assert.ok(rows()[1].querySelector(".dot-idle"));
+  assert.strictEqual(h.document.querySelectorAll("#sessions-list .session-background").length, 2);
+  assert.match(rows()[1].querySelector(".session-dot").title, /background process/);
+  h.post({ type: "sessionStatuses", statuses: { work: "running", wait: "idle" }, background: ["work", "wait"] });
+  h.post({ type: "sessionStatuses", statuses: { work: "running", wait: "idle" }, background: [] });
+  await h.settle(5);
+  assert.strictEqual(h.document.querySelectorAll("#sessions-list .session-background").length, 0, "connection changes repaint even when work state is unchanged");
+  assert.ok(rows()[1].querySelector(".dot-idle"));
+  h.post({ type: "sessionStatuses", statuses: {}, background: [] });
+  await h.settle(5);
+  assert.strictEqual(h.document.querySelectorAll("#sessions-list .dot-dead").length, 2);
+});
+
 test("a backgrounded session waiting on input shows the attention dot", async () => {
   const h = createHarness();
   h.post({ type: "ready" });

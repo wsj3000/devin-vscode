@@ -82,6 +82,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   let sessionStatuses = {};
   // Sessions another chat surface is running (an editor tab, or the side panel).
   let elsewhereIds = [];
+  let backgroundIds = [];
   // Retained transcripts so switching back to an idle session is instant (no
   // reload): id -> { frag, turns, ... }. A dirty id changed in the background
   // and must be reloaded instead of restored. curSessionId is the session whose
@@ -6878,12 +6879,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // churning the DOM and dropping row focus. A genuine change always yields a
   // different signature, so no update is ever missed.
   let lastStatusSig = "";
-  function applyStatuses(statuses, activeId, elsewhere) {
+  function applyStatuses(statuses, activeId, elsewhere, background) {
     const next = statuses || {};
     sessionStatuses = next;
     if (activeId !== undefined) lastActiveId = activeId;
     if (Array.isArray(elsewhere)) elsewhereIds = elsewhere;
-    const sig = Object.keys(next).sort().map((k) => k + ":" + next[k]).join(",") + "|" + (lastActiveId || "") + "|" + elsewhereIds.join(",");
+    if (Array.isArray(background)) backgroundIds = background;
+    const sig = Object.keys(next).sort().map((k) => k + ":" + next[k]).join(",") + "|" + (lastActiveId || "") + "|" + elsewhereIds.join(",") + "|" + backgroundIds.join(",");
     if (sig === lastStatusSig) return;
     lastStatusSig = sig;
     if (listCtrl) listCtrl.refresh();
@@ -6936,6 +6938,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       : away ? "Running in " + (inEditor() ? "the side panel" : "an editor tab")
       : st === "idle" ? "Alive, waiting for you"
       : "Not running";
+    if (backgroundIds.includes(s.id)) dot.title += " (background process, not attached to this window)";
     title.insertBefore(dot, title.firstChild);
     if (st === "attention") item.classList.add("needs-attention");
     // Running on another surface: say so before it is clicked, since a chat runs
@@ -6959,6 +6962,13 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
     code.textContent = s.short_id || s.id;
     meta.appendChild(time);
     meta.appendChild(code);
+    if (backgroundIds.includes(s.id)) {
+      const badge = document.createElement("span");
+      badge.className = "session-background";
+      badge.textContent = "Background";
+      badge.title = "The background process is alive. Open this conversation to reconnect.";
+      meta.appendChild(badge);
+    }
     main.appendChild(title);
     main.appendChild(meta);
     main.addEventListener("click", () => {
@@ -7208,6 +7218,7 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
   // --- Error rendering -----------------------------------------------------
 
   function renderError(text) {
+    stopThreadLoading();
     // An error ends the in-flight turn. Clear busy defensively so a failed
     // send/new-session (where the host may not post busy=false) never leaves the
     // composer stuck on Stop.
@@ -7494,6 +7505,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
       case "replay":
         for (const item of m.items || []) handleMessage(item);
         break;
+      case "loadingProgress": {
+        const label = el.thread.querySelector(".thread-loading span");
+        if (loadingSession && label) label.textContent = "Loading session (" + Math.floor(m.elapsedMs / 1000) + "s, " + m.updates + " updates received)";
+        break;
+      }
       case "body":
         setView("chat");
         if (m.body === "list") {
@@ -7549,10 +7565,11 @@ import { renderMarkdown, renderShell, renderCode } from "./markdown.js";
         hideLoadingBar();
         if (m.statuses) sessionStatuses = m.statuses;
         if (Array.isArray(m.elsewhere)) elsewhereIds = m.elsewhere;
+        if (Array.isArray(m.background)) backgroundIds = m.background;
         renderSessions(m.sessions, m.activeId, m.folders);
         updateTerminateBtn();
         break;
-      case "sessionStatuses": applyStatuses(m.statuses, m.activeId, m.elsewhere); break;
+      case "sessionStatuses": applyStatuses(m.statuses, m.activeId, m.elsewhere, m.background); break;
       case "sessionActivity": if (m.id && views.has(m.id)) dirtyViews.add(m.id); break;
       case "openSession":
         // Host-initiated open (e.g. the "needs your input" notification). Reuse

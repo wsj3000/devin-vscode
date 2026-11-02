@@ -2098,6 +2098,63 @@ test("a failed background reattachment leaves the original turn running", posixO
   }
 });
 
+test("failed cold loads and wakes end loading and report the actual failure", posixOnly, async () => {
+  for (const kind of ["view", "editor"]) {
+    for (const method of ["loadSession", "doWakeSession"]) {
+      const h = createChat({ kind });
+      try {
+        await h.ready();
+        h.controller.loadWithTakeover = async () => { throw new Error("background transcript memory limit"); };
+        const before = h.posted.length;
+        await h.controller[method]("unavailable-history");
+        const posts = h.posted.slice(before);
+        assert.ok(posts.some((m) => m.type === "loaded"), `${kind} ${method} releases the loading overlay`);
+        if (kind === "editor") assert.ok(posts.some((m) => m.type === "error" && m.text.includes("memory limit")));
+        assert.strictEqual(h.controller.runtimes.has("unavailable-history"), false);
+        assert.strictEqual(h.controller.starting.has("unavailable-history"), false);
+      } finally {
+        await h.dispose();
+      }
+    }
+  }
+});
+
+test("a reopened window discovers detached running and idle sessions without loading them", posixOnly, async () => {
+  for (const action of ["terminateSession", "deleteSession"]) {
+    const h = createChat({ promptDelay: 3500, config: { stopSessionsOnWindowClose: false } });
+    const id = await h.startChat("status remains visible without reconnecting");
+    let observer;
+    try {
+      await h.controller.shutdown();
+      observer = createChat({ cwd: h.cwd, storage: h.storage, config: { autoResumeLast: false } });
+      await observer.ready();
+      await observer.controller.refreshBackgroundAgents();
+      assert.strictEqual(observer.last("sessionStatuses").statuses[id], "running");
+      assert.ok(observer.last("sessionStatuses").background.includes(id));
+      assert.strictEqual(observer.liveChats(), 0, "passive discovery opens no runtime");
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        await observer.controller.refreshBackgroundAgents();
+        if (observer.last("sessionStatuses").statuses[id] === "idle") break;
+        await observer.settle(25);
+      }
+      assert.strictEqual(observer.last("sessionStatuses").statuses[id], "idle");
+      assert.strictEqual(h.agentSaw("session/load").length, 0);
+      assert.strictEqual(h.agentSaw("session/prompt").length, 1);
+      observer.answerWith(action === "deleteSession" ? "Delete" : "Terminate");
+      await observer.controller[action](id);
+      assert.strictEqual(observer.last("sessionStatuses").statuses[id], undefined, "a confirmed background stop turns the row gray");
+    } finally {
+      observer ??= createChat({ cwd: h.cwd, storage: h.storage });
+      await observer.controller.refreshBackgroundAgents();
+      observer.answerWith("Terminate");
+      await observer.controller.terminateSession(id);
+      await observer.dispose();
+      await h.dispose();
+    }
+  }
+});
+
 test("the default window policy still stops direct sessions", posixOnly, async () => {
   const h = createChat({ promptDelay: 700 });
   const id = await h.startChat("stop when the window closes");

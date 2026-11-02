@@ -7,13 +7,14 @@ import { TerminalManager } from "./terminal";
 import { cliCommand } from "../cli/locate";
 import { agentSocket, privateDirectory, sessionIndex } from "./persistentPaths";
 import { readAgentFile, writeAgentFile } from "./agentFiles";
+import { HISTORY_LIMIT_BYTES, ReplayHistory } from "./replayHistory";
 
-const MAX_HISTORY = 64 * 1024 * 1024;
+const MAX_BUFFERED_OUTPUT = 64 * 1024 * 1024;
 const MAX_FRAME = 8 * 1024 * 1024;
 const STATUS = "_devin.persist/status";
 const STOP = "_devin.persist/stop";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-type Peer = { socket: net.Socket; ready: boolean };
+type Peer = { socket: net.Socket; ready: boolean; replaying?: boolean; deferred: string[]; deferredBytes: number };
 type Callback = { method: string; params: any; resolve: (value: unknown) => void; reject: (error: Error) => void; peer?: Peer; id?: number };
 
 class Agent {
@@ -29,9 +30,7 @@ class Agent {
   private sessionId?: string;
   private opened?: any;
   private sessionParams?: any;
-  private history: any[] = [];
-  private historyBytes = 0;
-  private overflow = false;
+  private history = new ReplayHistory();
   private busy = false;
   private stopping = false;
   private terminalIds: string[] = [];
@@ -54,11 +53,26 @@ class Agent {
 
   private send(peer: Peer, message: any): void {
     if (peer.socket.destroyed) return;
-    if (peer.socket.writableLength > MAX_HISTORY + MAX_FRAME) {
+    if (peer.socket.writableLength > MAX_BUFFERED_OUTPUT + MAX_FRAME) {
       peer.socket.destroy();
       return;
     }
     peer.socket.write(JSON.stringify(message) + "\n");
+  }
+
+  private async writeFrame(peer: Peer, frame: string): Promise<void> {
+    if (peer.socket.destroyed) throw new Error("Devin background frontend disconnected during replay.");
+    if (peer.socket.write(frame)) return;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        peer.socket.off("drain", drained);
+        peer.socket.off("close", closed);
+      };
+      const drained = () => { cleanup(); resolve(); };
+      const closed = () => { cleanup(); reject(new Error("Devin background frontend disconnected during replay.")); };
+      peer.socket.once("drain", drained);
+      peer.socket.once("close", closed);
+    });
   }
 
   private publish(method: string, params: any): void {
@@ -67,13 +81,16 @@ class Agent {
       this.opened.configOptions = params.update.configOptions;
     }
     if (method !== "_devin.persist/terminalOutput" && method !== "_devin.persist/turnEnded" && (this.sessionId || method === "session/update")) {
-      const size = Buffer.byteLength(JSON.stringify(message));
-      if (this.historyBytes + size <= MAX_HISTORY) {
-        this.history.push(message);
-        this.historyBytes += size;
-      } else this.overflow = true;
+      this.history.append(message);
     }
-    if (this.owner?.ready) this.send(this.owner, message);
+    if (this.owner?.ready) {
+      if (this.owner.replaying) {
+        const frame = JSON.stringify(message) + "\n";
+        this.owner.deferredBytes += Buffer.byteLength(frame);
+        if (this.owner.deferredBytes > MAX_BUFFERED_OUTPUT) this.owner.socket.destroy();
+        else this.owner.deferred.push(frame);
+      } else this.send(this.owner, message);
+    }
   }
 
   private dispatch(request: Callback): void {
@@ -116,7 +133,10 @@ class Agent {
   private status(): any {
     return { pid: process.pid, agentPid: this.child.pid, sessionId: this.sessionId,
       busy: this.busy, runningTerminals: this.terminals.hasRunning(),
-      pendingRequests: this.callbacks.size, cli: this.cli, cwd: this.cwd, args: this.args };
+      pendingRequests: this.callbacks.size, cli: this.cli, cwd: this.cwd, args: this.args,
+      awaitingInput: [...this.callbacks].filter((request) => ["session/request_permission", "_session/elicitation", "elicitation/create"].includes(request.method)).length,
+      historyEncoding: "deflate-blocks-v1", historyLimitBytes: HISTORY_LIMIT_BYTES, historyBytes: this.history.compressedBytes,
+      historyRawBytes: this.history.rawBytes, historyEvents: this.history.events, historyOverflow: this.history.overflow };
   }
 
   private snapshot(): any {
@@ -169,9 +189,24 @@ class Agent {
         if (params.cwd !== this.sessionParams?.cwd || JSON.stringify(params.mcpServers || []) !== JSON.stringify(this.sessionParams?.mcpServers || [])) {
           throw new Error("Reopen this background session in its original workspace with the same MCP configuration.");
         }
-        if (this.overflow) throw new Error("Devin background transcript reached its memory limit. The task is still running.");
+        const blocks = this.history.snapshot();
+        if (this.history.overflow) throw new Error("Devin background compressed transcript reached its memory limit. The task is still running.");
         this.claim(peer);
-        for (const event of this.history) this.send(peer, event);
+        peer.replaying = true;
+        try {
+          for (const frame of this.history.frames(blocks)) {
+            if (this.owner !== peer) throw new Error("This session was opened in another window during replay.");
+            await this.writeFrame(peer, frame);
+          }
+          while (peer.deferred.length) {
+            const frames = peer.deferred.splice(0);
+            peer.deferredBytes = 0;
+            for (const frame of frames) await this.writeFrame(peer, frame);
+          }
+        } finally {
+          peer.replaying = false;
+        }
+        if (this.owner !== peer) throw new Error("This session was opened in another window during replay.");
         for (const terminalId of this.terminalIds) {
           this.send(peer, { jsonrpc: "2.0", method: "_devin.persist/terminalOutput", params: {
             sessionId: this.sessionId, terminalId, ...this.terminals.output(terminalId)
@@ -188,16 +223,13 @@ class Agent {
       if (method === "_devin.persist/skipTerminal") { reply({ skipped: this.terminals.skip(params.terminalId) }); return; }
       if (method === "session/prompt") {
         if (this.busy) throw new Error("The original Devin turn is still running.");
-        if (this.overflow) throw new Error("Devin background transcript reached its memory limit.");
+        if (this.history.overflow) throw new Error("Devin background compressed transcript reached its memory limit.");
         this.busy = true;
         for (const content of params.prompt || []) {
           // Saved for replay only. The live webview has already rendered its prompt.
-          const size = Buffer.byteLength(JSON.stringify(content));
-          if (this.historyBytes + size > MAX_HISTORY) { this.busy = false; throw new Error("Devin background transcript reached its memory limit."); }
-          this.history.push({ jsonrpc: "2.0", method: "session/update", params: {
+          this.history.append({ jsonrpc: "2.0", method: "session/update", params: {
             sessionId: params.sessionId, update: { sessionUpdate: "user_message_chunk", content }
           } });
-          this.historyBytes += size;
         }
       }
       if (id === undefined) { this.rpc.notify(method, params); return; }
@@ -232,7 +264,7 @@ class Agent {
   }
 
   accept(socket: net.Socket): void {
-    const peer = { socket, ready: false };
+    const peer: Peer = { socket, ready: false, deferred: [], deferredBytes: 0 };
     this.peers.add(peer);
     let buffer = "";
     socket.setEncoding("utf8");
@@ -316,32 +348,46 @@ async function daemon(root: string, key: string, cli: string, args: string[]): P
 async function proxy(root: string, key: string, cli: string, args: string[]): Promise<void> {
   process.stdin.pause();
   const file = agentSocket(root, key);
-  let socket = await connect(file);
-  if (!socket) {
+  const attach = async (): Promise<net.Socket> => {
+    let socket = await connect(file);
+    if (socket) return socket;
     const child = spawn(process.execPath, [__filename, "daemon", root, key, cli, ...args], {
       cwd: process.cwd(), env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, detached: true, stdio: "ignore"
     });
     child.unref();
     for (let i = 0; i < 200 && !socket; i++) { await sleep(50); socket = await connect(file); }
-  }
-  if (!socket) throw new Error("Devin background agent did not start.");
-  // Do not attach a different executable or working directory to a live agent.
-  const check = socket;
-  const response = await new Promise<any>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Devin background agent did not answer.")), 5000);
+    if (!socket) throw new Error("Devin background agent did not start.");
+    return socket;
+  };
+  const control = (socket: net.Socket, method: string): Promise<any> => new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); socket.off("data", onData); socket.off("close", failed); };
+    const failed = () => { cleanup(); reject(new Error("Devin background agent did not answer.")); };
+    const timer = setTimeout(failed, 5000);
     let data = "";
     const onData = (chunk: Buffer) => {
       data += chunk.toString("utf8");
       if (!data.includes("\n")) return;
-      clearTimeout(timer); check.off("data", onData);
+      cleanup();
       try { resolve(JSON.parse(data.slice(0, data.indexOf("\n")))); } catch (err) { reject(err); }
     };
-    check.on("data", onData);
-    check.write(JSON.stringify({ jsonrpc: "2.0", id: "hello", method: STATUS }) + "\n");
+    socket.on("data", onData);
+    socket.once("close", failed);
+    socket.write(JSON.stringify({ jsonrpc: "2.0", id: "hello", method }) + "\n");
   });
-  const result = response.result;
+  let socket = await attach();
+  const result = (await control(socket, STATUS)).result;
   if (!result || result.cwd !== process.cwd() || result.cli !== cli || JSON.stringify(result.args) !== JSON.stringify(args)) {
-    check.destroy(); throw new Error("Devin background command differs. Finish its work before changing the CLI or arguments.");
+    socket.destroy(); throw new Error("Devin background command differs. Finish its work before changing the CLI or arguments.");
+  }
+  // Replace an older cache implementation or limit only while idle and unowned.
+  // STOP rejects this request if another window owns the broker.
+  if ((!result.historyEncoding || result.historyLimitBytes !== HISTORY_LIMIT_BYTES) && result.sessionId && !result.busy && !result.runningTerminals && !result.pendingRequests) {
+    const stopped = await control(socket, STOP);
+    if (stopped.result?.stopped) {
+      for (let i = 0; i < 100 && !socket.destroyed; i++) await sleep(50);
+      if (!socket.destroyed) throw new Error("The idle legacy Devin background agent did not stop.");
+      socket = await attach();
+    }
   }
   socket.on("error", () => { process.exitCode = 1; process.stdin.destroy(); });
   socket.on("close", () => process.stdin.destroy());

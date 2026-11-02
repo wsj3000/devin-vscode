@@ -4,6 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import * as crypto from "crypto";
 import { AcpClient, AcpHost } from "../acp/client";
+import { BackgroundAgentStatus, scanBackgroundAgents, stopBackgroundAgent } from "../acp/backgroundAgents";
 import { readAgentFile, writeAgentFile, AgentFileEdit } from "../acp/agentFiles";
 import {
   AgentStopped,
@@ -68,6 +69,7 @@ interface Runtime {
   lastActivityAt: number; // for idle auto-exit
   remoteTerminals?: Map<string, { terminalId: string; output: string; exitStatus: TerminalExitStatus | null; skipped?: boolean; revealed?: boolean }>;
   persistentEnded?: boolean;
+  loadUpdates?: number;
   mode?: string;
   model?: string;
   configOptions?: ConfigOption[];
@@ -374,7 +376,7 @@ export class ChatController implements AcpHost {
   openOnReady?: string;
   private readonly ownDisposables: vscode.Disposable[] = [];
 
-  // Live runtimes keyed by session id. Absent = dead (gray) history.
+  // Runtimes attached to this surface. Detached agents are discovered separately.
   private readonly runtimes = new Map<string, Runtime>();
   // The session currently shown in the webview (the interactive one).
   private activeId?: string;
@@ -389,6 +391,9 @@ export class ChatController implements AcpHost {
   private startingNew?: Promise<Runtime>;
   private commandsQuery?: Promise<void>;
   private idleTimer?: NodeJS.Timeout;
+  private backgroundTimer?: NodeJS.Timeout;
+  private backgroundRefresh?: Promise<void>;
+  private readonly backgroundAgents = new Map<string, BackgroundAgentStatus>();
 
   private health?: CliHealth;
   private resolvedCli = "devin";
@@ -863,6 +868,8 @@ export class ChatController implements AcpHost {
   // Everything except the runtimes: timers, in-flight agent requests, and our
   // own subscriptions. Shared by both stop paths.
   private stopLocalState(): void {
+    if (this.backgroundTimer) clearInterval(this.backgroundTimer);
+    this.backgroundTimer = undefined;
     if (this.idleTimer) {
       clearInterval(this.idleTimer);
       this.idleTimer = undefined;
@@ -1423,9 +1430,13 @@ export class ChatController implements AcpHost {
   // refreshed by hand.
   private ownership = "";
 
+  private postStatuses(): void {
+    this.post({ type: "sessionStatuses", statuses: this.allStatuses(), activeId: this.activeId, elsewhere: this.elsewhere(), background: this.backgroundSessionIds() });
+  }
+
   private broadcastStatuses(): void {
     const own = this.statusMap();
-    this.post({ type: "sessionStatuses", statuses: { ...this.surfaces?.statuses(this), ...own }, activeId: this.activeId, elsewhere: this.elsewhere() });
+    this.postStatuses();
     const owned = `${Object.keys(own).sort().map((id) => `${id}:${own[id]}`).join(",")}|${this.activeId || ""}`;
     if (owned !== this.ownership) {
       this.ownership = owned;
@@ -1513,7 +1524,7 @@ export class ChatController implements AcpHost {
       .showErrorMessage(
         blamed
           ? `Couldn't open this session. These MCP servers failed to start: ${blamed}. See the Devin output for details.`
-          : "Couldn't open this session. A configured MCP server may have failed to start, or the session is unavailable. See the Devin output for details.",
+          : `Couldn't open this session: ${message}`,
         show
       )
       .then((choice) => {
@@ -1820,6 +1831,12 @@ export class ChatController implements AcpHost {
 
   private async onWebviewReady(): Promise<void> {
     this.webviewReady = true;
+    if (!this.backgroundTimer) {
+      this.backgroundTimer = setInterval(() => {
+        if (this.surfaceVisible && this.listVisible) void this.refreshBackgroundAgents();
+      }, 5000);
+      this.backgroundTimer.unref?.();
+    }
     this.releaseReadyWaiters();
     this.post({ type: "workspace", name: this.workspaceName() });
     // Which surface this is decides the whole chrome (an editor tab is one chat,
@@ -2240,7 +2257,8 @@ export class ChatController implements AcpHost {
   // any terminate that asks) returns to the sessions list.
   private async terminateSession(id: string, title?: string, returnToList?: boolean): Promise<void> {
     const rt = this.runtimes.get(id);
-    if (!rt) {
+    const background = this.backgroundAgents.get(id);
+    if (!rt && !background) {
       return;
     }
     const choice = await vscode.window.showWarningMessage(
@@ -2254,11 +2272,27 @@ export class ChatController implements AcpHost {
     // The runtime may have changed while the modal was open; re-read it.
     const live = this.runtimes.get(id);
     if (!live) {
+      if (background) {
+        let stopped = false;
+        try {
+          await stopBackgroundAgent(background);
+          this.backgroundAgents.delete(id);
+          stopped = true;
+        } catch (error) {
+          void vscode.window.showErrorMessage(`Couldn't stop this background session: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        await this.refreshBackgroundAgents();
+        if (stopped && (returnToList || this.activeId === id)) {
+          if (this.activeId === id) this.setBusy(false);
+          await this.closeOutSession();
+        }
+      }
       return;
     }
     this.settleRequestsFor(id);
     this.keepQueued(live);
     this.destroyRuntime(live);
+    this.backgroundAgents.delete(id);
     this.runtimes.delete(id);
     this.starting.delete(id);
     const wasActive = this.activeId === id;
@@ -2428,7 +2462,15 @@ export class ChatController implements AcpHost {
       this.runtimes.set(id, rt);
     }
     rt.replaying = true;
+    rt.loadUpdates = 0;
+    const progress = setInterval(() => {
+      if (!this.closed && this.activeId === id && rt.replaying) {
+        this.post({ type: "loadingProgress", updates: rt.loadUpdates, elapsedMs: Date.now() - startedAt });
+      }
+    }, 1000);
+    progress.unref?.();
     let loadFailed = "";
+    let visibleOnFailure = false;
     try {
       if (!already) {
         await this.ensureInitialized(rt);
@@ -2460,6 +2502,7 @@ export class ChatController implements AcpHost {
       }
       this.ensureIdleTimer();
     } catch (err) {
+      visibleOnFailure = this.activeId === id;
       // Waking failed: drop the half-spawned runtime so the row goes gray again,
       // and stop pointing `activeId` at a runtime that no longer exists.
       if (!already) {
@@ -2471,6 +2514,7 @@ export class ChatController implements AcpHost {
       }
       loadFailed = err instanceof Error ? err.message : String(err);
     } finally {
+      clearInterval(progress);
       rt.replaying = false;
       if (loadFailed) {
         rt.replay = [];
@@ -2487,8 +2531,9 @@ export class ChatController implements AcpHost {
         this.broadcastStatuses();
         // Only if the user is still on this chat. Closing out would otherwise send
         // them back to the list from a chat that opened perfectly well.
-        if (this.activeId === id) {
-          await this.closeOutSession(OPEN_FAILED);
+        if (this.activeId === id || (visibleOnFailure && !this.activeId)) {
+          this.post({ type: "loaded" });
+          await this.closeOutSession(`${OPEN_FAILED} ${loadFailed}`);
           this.reportLoadFailure(loadFailed, rt);
         } else {
           this.log(`[load-failed] ${id} (no longer on screen): ${loadFailed}`);
@@ -2670,6 +2715,7 @@ export class ChatController implements AcpHost {
     this.broadcastStatuses();
     let done: () => void = () => {};
     let wakeFailed = "";
+    let visibleOnFailure = false;
     rt.waking = new Promise<void>((resolve) => { done = resolve; });
     try {
       await this.ensureInitialized(rt);
@@ -2700,6 +2746,7 @@ export class ChatController implements AcpHost {
       }
       this.ensureIdleTimer();
     } catch (err) {
+      visibleOnFailure = this.activeId === id;
       if (this.runtimes.get(id) === rt) {
         this.destroyRuntime(rt, "detach");
         this.runtimes.delete(id);
@@ -2721,8 +2768,9 @@ export class ChatController implements AcpHost {
         // they have moved to another chat rips them out of the one they are reading
         // to report a failure in the one they left.
         this.sessionsCache = undefined;
-        if (this.activeId === id) {
-          await this.closeOutSession(OPEN_FAILED);
+        if (this.activeId === id || (visibleOnFailure && !this.activeId)) {
+          this.post({ type: "loaded" });
+          await this.closeOutSession(`${OPEN_FAILED} ${wakeFailed}`);
           this.reportLoadFailure(wakeFailed, rt);
         } else {
           this.log(`[wake-failed] ${id} (no longer on screen): ${wakeFailed}`);
@@ -2832,6 +2880,7 @@ export class ChatController implements AcpHost {
     if (!this.isReady()) {
       return;
     }
+    const backgroundRefresh = this.refreshBackgroundAgents();
     const startedAt = Date.now();
     const folders = this.folders();
     const trackedAtStart = new Set(this.store.ids());
@@ -2846,19 +2895,20 @@ export class ChatController implements AcpHost {
       try {
         source = "acp";
         const { sessions: live, prunedIds } = await this.listOverProtocol();
+        await backgroundRefresh;
         // Drop tracked ids Devin no longer knows about so stale rows self-heal,
         // but NEVER prune a session we still hold a live runtime for (or are
         // starting): a freshly created session is not in `devin list` until its
         // first turn persists, and pruning it here would make it vanish.
         for (const id of prunedIds) {
-          const held = this.runtimes.has(id) || this.starting.has(id) || !!this.surfaces?.owner(id);
+          const held = this.runtimes.has(id) || this.starting.has(id) || this.backgroundAgents.has(id) || !!this.surfaces?.owner(id);
           if (!held) {
             this.store.remove(id);
             void this.dropStaged(id);
           }
         }
         for (const evicted of await this.store.importSessions(live)) {
-          if (!this.runtimes.has(evicted) && !this.surfaces?.owner(evicted)) {
+          if (!this.runtimes.has(evicted) && !this.backgroundAgents.has(evicted) && !this.surfaces?.owner(evicted)) {
             void this.dropStaged(evicted);
           }
         }
@@ -2870,6 +2920,7 @@ export class ChatController implements AcpHost {
         sessions = this.sessionsCache?.sessions ?? [];
       }
     }
+    await backgroundRefresh;
     const trackedNow = new Set(this.store.ids());
     sessions = sessions.filter((session) => !trackedAtStart.has(session.id) || trackedNow.has(session.id));
     // List every live session even when `devin list` has not caught up yet (a
@@ -2880,13 +2931,13 @@ export class ChatController implements AcpHost {
     const known = new Set(sessions.map((s) => s.id));
     const cwds = this.store.cwds();
     const titles = this.store.titles();
-    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys(), ...this.elsewhere()]);
+    const liveIds = new Set<string>([...this.starting, ...this.runtimes.keys(), ...this.elsewhere(), ...this.backgroundAgents.keys()]);
     const synthesized: DevinSession[] = [];
     for (const id of liveIds) {
       if (known.has(id)) {
         continue;
       }
-      const cwd = cwds[id] || this.runtimes.get(id)?.cwd || this.cwd();
+      const cwd = cwds[id] || this.runtimes.get(id)?.cwd || this.backgroundAgents.get(id)?.cwd || this.cwd();
       synthesized.push({
         id,
         short_id: id,
@@ -2926,6 +2977,7 @@ export class ChatController implements AcpHost {
       statuses: this.allStatuses(),
       // Rows another surface is running, so they can say so before being clicked.
       elsewhere: this.elsewhere(),
+      background: this.backgroundSessionIds(),
       folders: folders.map((f) => ({ path: f, name: path.basename(f) }))
     });
     this.log(`[perf] session-list ${source} ${Date.now() - startedAt}ms`);
@@ -2936,13 +2988,37 @@ export class ChatController implements AcpHost {
   }
 
   private allStatuses(): Record<string, SessionStatus> {
-    return { ...this.surfaces?.statuses(this), ...this.statusMap() };
+    const background: Record<string, SessionStatus> = {};
+    for (const [id, agent] of this.backgroundAgents) {
+      background[id] = (agent.awaitingInput ?? agent.pendingRequests) > 0 ? "attention" : agent.busy || agent.runningTerminals ? "running" : "idle";
+    }
+    return { ...background, ...this.surfaces?.statuses(this), ...this.statusMap() };
+  }
+
+  private backgroundSessionIds(): string[] {
+    return [...this.backgroundAgents.keys()].filter((id) => !this.runtimes.has(id) && !this.starting.has(id) && !this.surfaces?.owner(id)).sort();
+  }
+
+  private async refreshBackgroundAgents(): Promise<void> {
+    if (this.closed) return;
+    if (this.backgroundRefresh) return this.backgroundRefresh;
+    const refresh = (async () => {
+      const agents = (await scanBackgroundAgents()).filter((agent) => agent.cli === this.resolvedCli);
+      if (this.closed) return;
+      const added = agents.some((agent) => !this.backgroundAgents.has(agent.sessionId));
+      this.backgroundAgents.clear();
+      for (const agent of agents) this.backgroundAgents.set(agent.sessionId, agent);
+      this.postStatuses();
+      if (added) void this.refreshSessionsIfVisible(false, true);
+    })();
+    this.backgroundRefresh = refresh;
+    try { await refresh; } finally { if (this.backgroundRefresh === refresh) this.backgroundRefresh = undefined; }
   }
 
   // Another surface started, moved or stopped a chat: re-list, so this surface's
   // rows, dots and "running elsewhere" badges say what is actually true.
   surfacesChanged(): void {
-    this.post({ type: "sessionStatuses", statuses: this.allStatuses(), activeId: this.activeId, elsewhere: this.elsewhere() });
+    this.postStatuses();
     void this.refreshSessionsIfVisible();
   }
 
@@ -2988,7 +3064,8 @@ export class ChatController implements AcpHost {
       if (rt.awaiting > 0 && id !== this.activeId) {
         statuses[id] = "attention";
       } else {
-        statuses[id] = rt.busy && rt.awaiting === 0 ? "running" : "idle";
+        const terminalRunning = rt.terminals.hasRunning() || [...(rt.remoteTerminals?.values() || [])].some((terminal) => !terminal.exitStatus);
+        statuses[id] = (rt.busy || terminalRunning) && rt.awaiting === 0 ? "running" : "idle";
       }
     }
     // Last, not first: a load and a wake both register the runtime before the replay
@@ -3090,6 +3167,16 @@ export class ChatController implements AcpHost {
     if (choice !== "Delete") {
       return;
     }
+    const background = this.backgroundAgents.get(id);
+    if (!this.runtimes.has(id) && background) {
+      try {
+        await stopBackgroundAgent(background);
+      } catch (error) {
+        void vscode.window.showErrorMessage(`Couldn't stop this background session before deletion: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+    }
+    this.backgroundAgents.delete(id);
     // Kill its live runtime first (frees the lock), then delete server-side.
     const rt = this.runtimes.get(id);
     if (rt) {
@@ -5038,6 +5125,7 @@ export class ChatController implements AcpHost {
   private onUpdate(n: SessionUpdateNotification, owner?: Runtime): void {
     const u = n.update as any;
     const rt = this.runtimeBySessionId(n.sessionId, owner);
+    if (rt?.replaying) rt.loadUpdates = (rt.loadUpdates || 0) + 1;
     // Delegated work arrives on the same stream as the parent's, tagged in
     // `_meta`. Lift the lifecycle out first, then hand the rest to the switch
     // with the owning subagent attached so the webview can nest it.
